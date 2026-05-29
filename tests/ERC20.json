@@ -1,0 +1,20 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [1000000] },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1000000 },
+    { "action": "read", "message": "totalSupply", "args": [], "expected": 1000000 },
+    { "action": "call", "message": "transfer", "args": ["//Bob", 1000], "signer": "//Alice" },
+    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Bob", "value": 1000 } },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 999000 },
+    { "action": "read", "message": "balanceOf", "args": ["//Bob"], "expected": 1000 },
+    { "action": "call", "message": "approve", "args": ["//Bob", 500], "signer": "//Alice" },
+    { "action": "event", "name": "Approval", "expected": { "owner": "//Alice", "spender": "//Bob", "value": 500 } },
+    { "action": "read", "message": "allowance", "args": ["//Alice", "//Bob"], "expected": 500 },
+    { "action": "call", "message": "transferFrom", "args": ["//Alice", "//Charlie", 500], "signer": "//Bob" },
+    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Charlie", "value": 500 } },
+    { "action": "read", "message": "balanceOf", "args": ["//Charlie"], "expected": 500 },
+    { "action": "read", "message": "allowance", "args": ["//Alice", "//Bob"], "expected": 0 },
+    { "action": "revert", "message": "transfer", "args": ["//Bob", 1000000000], "signer": "//Charlie" }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [0] },
+    { "action": "read", "message": "get", "args": [], "expected": 0 },
+    { "action": "call", "message": "set", "args": [42] },
+    { "action": "read", "message": "get", "args": [], "expected": 42 },
+    { "action": "revert", "message": "setIfPositive", "args": [0] },
+    { "action": "call", "message": "setIfPositive", "args": [7] },
+    { "action": "read", "message": "get", "args": [], "expected": 7 }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "call", "message": "deposit", "args": [], "signer": "//Alice", "value": 5 },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 500000000000000 },
+    { "action": "call", "message": "withdraw", "args": [200000000000000], "signer": "//Alice" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 300000000000000 },
+    { "action": "revert", "message": "withdraw", "args": [1000000000000000], "signer": "//Alice" }
+  ]
+}

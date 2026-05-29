@@ -1,0 +1,11 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "owner", "args": [], "expected": "//Alice" },
+    { "action": "revert", "message": "transferOwnership", "args": ["//Bob"], "signer": "//Bob" },
+    { "action": "read", "message": "owner", "args": [], "expected": "//Alice" },
+    { "action": "call", "message": "transferOwnership", "args": ["//Bob"], "signer": "//Alice" },
+    { "action": "read", "message": "owner", "args": [], "expected": "//Bob" }
+  ]
+}
