@@ -1,0 +1,17 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Backups
+*.bak
+docs/superpowers/plans/2026-05-29-inkport-framework.md
+docs/superpowers/specs/2026-05-29-inkport-hardhat-framework-design.md
+.gitignore
+portaldot-reference.md
+prd.md
