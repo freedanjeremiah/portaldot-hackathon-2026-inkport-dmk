@@ -16,7 +16,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from inkport_chain.strip_wasm import strip  # noqa: E402
-from inkport_chain.test_contract import run_contract_test  # noqa: E402
+from inkport_chain.test_contract import (  # noqa: E402
+    run_contract_test,
+    ContractTester,
+    pubkey,
+)
+from inkport_chain.portaldot import POT  # noqa: E402
+
+ALICE = pubkey("//Alice")
+BOB = pubkey("//Bob")
+CHARLIE = pubkey("//Charlie")
 
 TRANSLATOR = ROOT / "translator"
 BIN = TRANSLATOR / "target" / "release" / "inkport-translate"
@@ -45,6 +54,70 @@ def prepare(sol_name, crate_name):
     n = strip(str(raw), str(stripped))
     print(f"  stripped {crate_name}: {n} bytes")
     return str(stripped), str(out / "metadata.json")
+
+
+def _run(name, fn):
+    """Run a tier-test closure, printing a banner and PASS/FAIL line."""
+    print(f"\n=== {name}: on-chain test ===")
+    try:
+        fn()
+        print(f"=== {name}: ALL ASSERTIONS PASSED ===")
+        return True
+    except AssertionError as e:
+        print(f"=== {name}: ASSERTION FAILED: {e} ===")
+        return False
+
+
+def test_erc20(wasm, meta):
+    t = ContractTester(wasm, meta, ctor_args=[1_000_000], deployer="//Alice")
+    try:
+        t.deploy()
+        t.read("balanceOf", [ALICE], 1_000_000)
+        t.read("totalSupply", [], 1_000_000)
+        t.call("transfer", [BOB, 1000], signer="//Alice")
+        t.assert_event("Transfer", {"from": ALICE, "to": BOB, "value": 1000})
+        t.read("balanceOf", [ALICE], 999_000)
+        t.read("balanceOf", [BOB], 1000)
+        t.call("approve", [BOB, 500], signer="//Alice")
+        t.assert_event("Approval", {"owner": ALICE, "spender": BOB, "value": 500})
+        t.read("allowance", [ALICE, BOB], 500)
+        t.call("transferFrom", [ALICE, CHARLIE, 500], signer="//Bob")
+        t.assert_event("Transfer", {"from": ALICE, "to": CHARLIE, "value": 500})
+        t.read("balanceOf", [CHARLIE], 500)
+        t.read("allowance", [ALICE, BOB], 0)
+        # A transfer exceeding balance must revert.
+        t.revert("transfer", [BOB, 10 ** 9], signer="//Charlie")
+    finally:
+        t.close()
+
+
+def test_ownable(wasm, meta):
+    t = ContractTester(wasm, meta, ctor_args=[], deployer="//Alice")
+    try:
+        t.deploy()
+        t.read("owner", [], ALICE)
+        # transferOwnership as a non-owner must revert (onlyOwner guard).
+        t.revert("transferOwnership", [BOB], signer="//Bob")
+        t.read("owner", [], ALICE)
+        # as the owner it succeeds.
+        t.call("transferOwnership", [BOB], signer="//Alice")
+        t.read("owner", [], BOB)
+    finally:
+        t.close()
+
+
+def test_bank(wasm, meta):
+    t = ContractTester(wasm, meta, ctor_args=[], deployer="//Alice")
+    try:
+        t.deploy()
+        t.call("deposit", [], signer="//Alice", value=5 * POT)
+        t.read("balanceOf", [ALICE], 5 * POT)
+        t.call("withdraw", [2 * POT], signer="//Alice")
+        t.read("balanceOf", [ALICE], 3 * POT)
+        # withdrawing more than the balance must revert.
+        t.revert("withdraw", [10 * POT], signer="//Alice")
+    finally:
+        t.close()
 
 
 def main():
@@ -90,6 +163,16 @@ def main():
             ("read", "get", [], 7),
         ],
     )
+
+    # ----- mapping / event / payable tier -----
+    wasm, meta = prepare("ERC20.sol", "erc20")
+    results["ERC20"] = _run("ERC20", lambda: test_erc20(wasm, meta))
+
+    wasm, meta = prepare("Ownable.sol", "ownable")
+    results["Ownable"] = _run("Ownable", lambda: test_ownable(wasm, meta))
+
+    wasm, meta = prepare("Bank.sol", "bank")
+    results["Bank"] = _run("Bank", lambda: test_bank(wasm, meta))
 
     print("\n========== SUMMARY ==========")
     ok = True

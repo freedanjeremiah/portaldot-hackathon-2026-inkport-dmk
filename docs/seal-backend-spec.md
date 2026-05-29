@@ -75,6 +75,17 @@ Helper conventions: `input()` reads up to 512 bytes; `ret(&[u8]) -> !` returns f
 ```
 The CLI/harness uses this to encode calls and decode returns. No hardcoded per-contract logic.
 
+## Wasm constraints (rent-era validator)
+The node's `pallet-contracts` wasm validator only accepts **MVP wasm**; it rejects
+post-MVP features with `"Can't decode wasm code"`. Two rules the backend enforces:
+- **No `memory.fill` / `memory.copy`.** A zero-initialized stack array larger than
+  32 bytes (`[0u8; N]`, N>32) makes LLVM emit `memory.fill`; >32-byte slice copies
+  emit `memory.copy`. The codegen therefore reads `seal_input` into a
+  `MaybeUninit::<[u8; N]>` buffer (no zeroing) and writes all multi-byte event/key
+  buffers via explicit byte loops. The `target-feature=-bulk-memory` rustflag alone
+  does **not** suppress these — the source must avoid the memset/memcpy.
+- Input buffers are still sized to the SCALE payload (not a fixed 512).
+
 ## Validation requirement (zero mock)
 Every supported contract must: translate → `cargo build` to wasm → strip → **deploy to
 `wss://portaldot.philotheephilix.in` and pass behavioral assertions via dry-run reads + real

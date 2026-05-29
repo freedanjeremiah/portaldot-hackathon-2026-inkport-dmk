@@ -34,18 +34,47 @@ class Portaldot:
                 return _astr(e["attributes"]), rcpt
         raise RuntimeError("no contract address in events")
 
-    def call(self, addr, data):
+    def signer(self, suri):
+        """Return a fresh dev keypair for `suri` (e.g. '//Bob')."""
+        return Keypair.create_from_uri(suri, ss58_format=42)
+
+    def call(self, addr, data, value=0, keypair=None):
+        kp = keypair or self.kp
         c = self.s.compose_call("Contracts", "call", {
-            "dest": {"Id": addr}, "value": 0, "gas_limit": GAS, "data": data})
-        rcpt = self.s.submit_extrinsic(self.s.create_signed_extrinsic(call=c, keypair=self.kp), wait_for_inclusion=True)
+            "dest": {"Id": addr}, "value": value, "gas_limit": GAS, "data": data})
+        rcpt = self.s.submit_extrinsic(self.s.create_signed_extrinsic(call=c, keypair=kp), wait_for_inclusion=True)
         if not rcpt.is_success:
             raise RuntimeError(f"call failed: {rcpt.error_message}")
         return rcpt
 
-    def read(self, addr, data):
+    def events(self, rcpt):
+        """Extract raw ContractEmitted event data bytes from a receipt.
+
+        Returns a list of bytes payloads (the seal_deposit_event `data`)."""
+        out = []
+        for ev in rcpt.triggered_events:
+            e = ev.value["event"]
+            if e["module_id"] == "Contracts" and e["event_id"] in ("ContractEmitted", "Emitted"):
+                attrs = e["attributes"]
+                data = None
+                if isinstance(attrs, dict):
+                    data = attrs.get("data")
+                elif isinstance(attrs, (list, tuple)):
+                    # list-of-attrs form: [{AccountId}, {Vec<u8> data}].
+                    data = attrs[-1]
+                # Unwrap a {"type":..,"value":..} attribute wrapper.
+                if isinstance(data, dict):
+                    data = data.get("value")
+                if isinstance(data, str) and data.startswith("0x"):
+                    out.append(bytes.fromhex(data[2:]))
+                elif isinstance(data, (list, tuple)):
+                    out.append(bytes(data))
+        return out
+
+    def read(self, addr, data, origin=None, value=0):
         """Dry-run a message; return raw output bytes."""
         r = self.s.rpc_request("contracts_call", [{
-            "origin": self.kp.ss58_address, "dest": addr, "value": 0,
+            "origin": origin or self.kp.ss58_address, "dest": addr, "value": value,
             "gasLimit": GAS, "inputData": data}])["result"]
         ok = r["result"]["Ok"]
         return bytes.fromhex(ok["data"][2:])
