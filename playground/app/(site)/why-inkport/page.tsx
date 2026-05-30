@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import RevealInit from '@/components/RevealInit';
 
 export const metadata = {
   title: 'Why InkPort — seal0, integrity, and design decisions',
@@ -24,6 +25,7 @@ const IcArrow = () => (
 export default function WhyInkPortPage() {
   return (
     <>
+      <RevealInit />
       {/* Hero */}
       <section className="why-hero grid-bg">
         <div className="wrap-narrow">
