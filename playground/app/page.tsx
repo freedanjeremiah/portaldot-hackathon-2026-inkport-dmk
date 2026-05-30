@@ -4,7 +4,7 @@ import { translate } from '@/lib/translator';
 import { readSSE } from '@/lib/sse';
 import type { SSEPayload } from '@/lib/sse';
 import FauxEditor from '@/components/FauxEditor';
-import { Stepper, CompilePanel, DeployPanel, CallPanel, Ic } from '@/components/Pipeline';
+import { PipelineRail, Ic } from '@/components/Pipeline';
 import type { LogLine } from '@/components/Pipeline';
 import type { Metadata } from '@/lib/translator';
 import type { Statuses, CompileState, DeployState, CallPanelState } from '@/components/Pipeline';
@@ -63,7 +63,6 @@ export default function PlaygroundPage() {
 
   const [active, setActive] = useState('compile');
   const [leftPct, setLeftPct] = useState(50);
-  const [pipeH, setPipeH] = useState(330);
 
   const firstRef = useRef(true);
   const sessionIdRef = useRef<string>('');
@@ -245,19 +244,16 @@ export default function PlaygroundPage() {
     document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
   };
 
-  const onPipeDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const startY = e.clientY, startH = pipeH;
-    const move = (ev: MouseEvent) => setPipeH(Math.max(190, Math.min(560, startH - (ev.clientY - startY))));
-    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
-    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-  };
-
-  const ActivePanel = active === 'deploy' ? DeployPanel : active === 'call' ? CallPanel : CompilePanel;
-
   return (
     <div className="app">
       <div className="topbar">
+        <a href="/home" className="topbar-back">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+          InkPort
+        </a>
+        <div className="topbar-divider" />
         <div className="brand">
           <div className="brand-mark"><Ic.bolt width={13} height={13} /></div>
           <span className="brand-name">Ink<b>Port</b> Playground</span>
@@ -268,45 +264,43 @@ export default function PlaygroundPage() {
         <StatusBadge statuses={statuses} translating={translating} runningWhat={runningWhat} />
       </div>
 
-      <div className="editors">
-        <div className="pane" style={{ width: leftPct + '%' }}>
-          <div className="pane-header">
-            <span className="pane-tab"><span className="dotfile">contracts/</span>{meta.name}.sol</span>
-            <span className="lang-chip">solidity</span>
-            <div className="ph-right"><span className="ro-tag">editable</span></div>
+      <div className="main-area">
+        <div className="editors">
+          <div className="pane" style={{ width: leftPct + '%' }}>
+            <div className="pane-header">
+              <span className="pane-tab"><span className="dotfile">contracts/</span>{meta.name}.sol</span>
+              <span className="lang-chip">solidity</span>
+              <div className="ph-right"><span className="ro-tag">editable</span></div>
+            </div>
+            <FauxEditor value={solidity} onChange={setSolidity} language="solidity" readOnly={false} />
           </div>
-          <FauxEditor value={solidity} onChange={setSolidity} language="solidity" readOnly={false} />
-        </div>
 
-        <div className="divider" onMouseDown={onDividerDown} />
+          <div className="divider" onMouseDown={onDividerDown} />
 
-        <div className="pane" style={{ width: (100 - leftPct) + '%', position: 'relative' }}>
-          <div className="pane-header">
-            <span className="pane-tab"><span className="dotfile">build/{meta.name}/src/</span>lib.rs</span>
-            <span className="lang-chip">rust · seal0</span>
-            <div className="ph-right">
-              {translating
-                ? <span className="translate-flag"><span className="mini-spinner" />translating</span>
-                : <span className="ro-tag">read-only · live</span>}
+          <div className="pane" style={{ width: (100 - leftPct) + '%', position: 'relative' }}>
+            <div className="pane-header">
+              <span className="pane-tab"><span className="dotfile">build/{meta.name}/src/</span>lib.rs</span>
+              <span className="lang-chip">rust · seal0</span>
+              <div className="ph-right">
+                {translating
+                  ? <span className="translate-flag"><span className="mini-spinner" />translating</span>
+                  : <span className="ro-tag">read-only · live</span>}
+              </div>
+            </div>
+            <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+              <FauxEditor value={rust} onChange={() => {}} language="rust" readOnly={true} />
+              {translateError && (
+                <div className="rust-error">
+                  <div className="re-head"><Ic.cross width={13} height={13} /> translate error — Rust output is stale</div>
+                  {translateError}
+                  {'\n\n'}<span style={{ color: 'var(--text-faint)' }}>// editor is never blocked — fix the Solidity to regenerate</span>
+                </div>
+              )}
             </div>
           </div>
-          <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
-            <FauxEditor value={rust} onChange={() => {}} language="rust" readOnly={true} />
-            {translateError && (
-              <div className="rust-error">
-                <div className="re-head"><Ic.cross width={13} height={13} /> translate error — Rust output is stale</div>
-                {translateError}
-                {'\n\n'}<span style={{ color: 'var(--text-faint)' }}>// editor is never blocked — fix the Solidity to regenerate</span>
-              </div>
-            )}
-          </div>
         </div>
-      </div>
 
-      <div className="pipeline" style={{ height: pipeH }}>
-        <div className="pipeline-resize" onMouseDown={onPipeDown} />
-        <Stepper statuses={statuses} active={active} onSelect={setActive} />
-        <ActivePanel bus={bus} />
+        <PipelineRail bus={bus} active={active} onSelect={setActive} translateError={translateError} />
       </div>
     </div>
   );
