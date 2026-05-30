@@ -355,6 +355,7 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
                     data = test_contract.encode_ctor(ctor_types, ctor_args)
                     addr, _ = p.deploy(str(P.wasm_path(root, name)), ctor_data=data,
                                        endowment_pot=int(step.get("value", 10)))
+                    _save_deployment(root, net["name"], name, addr)
                     typer.echo(f"  [PASS] deploy({ctor_args}) -> {addr}")
                     continue
 
@@ -367,6 +368,7 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
                     dep_addr, _ = p.deploy(str(P.wasm_path(root, dep_name)),
                                            ctor_data=dep_data,
                                            endowment_pot=int(step.get("value", 10)))
+                    _save_deployment(root, net["name"], dep_name, dep_addr)
                     deps[step.get("as", dep_name)] = dep_addr
                     typer.echo(f"  [PASS] deploy_dep {dep_name}({dep_args}) -> {dep_addr}")
                     continue
