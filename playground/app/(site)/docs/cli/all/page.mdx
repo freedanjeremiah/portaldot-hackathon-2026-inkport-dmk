@@ -1,0 +1,26 @@
+export const metadata = { title: 'inkport all — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport all
+
+Translate, build, deploy, and test every contract in `contracts/` that has a matching `tests/*.json`.
+
+```bash
+inkport all
+```
+
+This is the full regression suite. It runs sequentially (one signer, one deploy at a time) and prints a summary:
+
+```
+========== inkport all: SUMMARY ==========
+  Counter      PASS  (5 steps)
+  Flipper      PASS  (3 steps)
+  ERC20        PASS  (8 steps)
+  ...
+  ALL PASS  (30/30)
+```
+
+**Warning:** `inkport all` deploys fresh instances of every contract. Do not run it concurrently with another `inkport all` or `inkport deploy` — nonce conflicts will cause failures.
+
+**Runtime:** ~10–20 minutes for 30 contracts on the live Portaldot node over WSS.

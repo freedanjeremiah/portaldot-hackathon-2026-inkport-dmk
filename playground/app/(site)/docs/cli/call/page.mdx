@@ -1,0 +1,36 @@
+export const metadata = { title: 'inkport call — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport call
+
+Call a message on a deployed contract.
+
+```bash
+inkport call <Name> <message> [--arg <value>]... [--signer <uri>] [--value <POT>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `<Name>` | required | Contract name |
+| `<message>` | required | Message name as defined in `metadata.json` |
+| `--arg <value>` | — | Message argument (repeat for each) |
+| `--signer <uri>` | `//Alice` | Signer SURI |
+| `--value <POT>` | `0` | Value in POT for payable messages |
+
+**View (non-mutating):** executes as a dry-run read — free, instant, prints decoded return value.
+
+**Mutating:** submits a real `Contracts.call` extrinsic, waits for inclusion, prints events.
+
+**Examples:**
+
+```bash
+inkport call ERC20 balanceOf --arg //Alice
+# → 1000000
+
+inkport call ERC20 transfer --arg //Bob --arg 250
+# → Transfer(from=//Alice, to=//Bob, value=250)
+
+inkport call Bank deposit --value 5
+# → (payable call, 5 POT transferred)
+```

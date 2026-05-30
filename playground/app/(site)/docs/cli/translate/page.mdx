@@ -1,0 +1,46 @@
+export const metadata = { title: 'inkport translate — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport translate
+
+Translate a Solidity source file to seal0 Rust + `metadata.json`.
+
+```bash
+inkport translate <file.sol> [--out <dir>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `<file.sol>` | required | Path to the Solidity source file |
+| `--out <dir>` | `build/<Name>/` | Output directory |
+
+**Output files:**
+
+| File | Description |
+|---|---|
+| `build/<Name>/src/lib.rs` | Generated seal0 Rust crate (`#![no_std]`) |
+| `build/<Name>/metadata.json` | Contract name, constructor args, messages (selector, args, ret, mutates, payable), events |
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | Translation succeeded |
+| `1` | Unsupported construct detected — printed to stderr, nothing emitted |
+
+**Example:**
+
+```bash
+inkport translate contracts/ERC20.sol
+# → build/ERC20/src/lib.rs
+# → build/ERC20/metadata.json
+```
+
+**Fail-loud example:**
+
+```bash
+inkport translate contracts/Bad.sol
+# error: `delegatecall` is rejected (no host function on rent-era pallet-contracts)
+# exit 1 — nothing written
+```

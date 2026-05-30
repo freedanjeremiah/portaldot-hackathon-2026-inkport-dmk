@@ -1,0 +1,31 @@
+export const metadata = { title: 'inkport deploy — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport deploy
+
+Deploy a compiled contract to the Portaldot chain.
+
+```bash
+inkport deploy <Name> [--arg <value>]... [--signer <uri>] [--value <POT>]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `<Name>` | required | Contract name (must have `build/<Name>/` present) |
+| `--arg <value>` | — | Constructor argument (repeat for each arg) |
+| `--signer <uri>` | `//Alice` | SURI or SS58 address of the signer |
+| `--value <POT>` | `0` | Endowment in POT (14 decimals) |
+
+Calls `instantiate_with_code` on `wss://portaldot.philotheephilix.in`. The contract address is printed on success and saved to `deployments/portaldot.json`.
+
+**Example:**
+
+```bash
+inkport deploy ERC20 --arg 1000000
+# deployed ERC20 -> 5D1gqjjMi4...
+```
+
+**Dev signers:** `//Alice`, `//Bob`, `//Charlie` resolve to the pre-funded Portaldot dev accounts.
+
+**Sequential constraint:** A single signer (`//Alice`) means concurrent deploys cause nonce conflicts. Never run two `inkport deploy` or `inkport all` processes simultaneously.

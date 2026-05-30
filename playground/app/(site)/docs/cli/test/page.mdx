@@ -1,0 +1,26 @@
+export const metadata = { title: 'inkport test — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport test
+
+Run a contract's on-chain test spec.
+
+```bash
+inkport test <Name>
+```
+
+Deploys a fresh instance of `<Name>` and executes each step in `tests/<Name>.json` against the live Portaldot node. Prints `PASS` / `FAIL` per step.
+
+**Example:**
+
+```bash
+inkport test ERC20
+# deploy ERC20 -> 5D…  PASS
+# read balanceOf(//Alice) → 1000000  PASS
+# call transfer(//Bob, 1000)  PASS
+# event Transfer(from=//Alice, to=//Bob, value=1000)  PASS
+# read balanceOf(//Bob) → 1000  PASS
+```
+
+See [Test spec format](/docs/reference/test-spec) for the full step schema.
