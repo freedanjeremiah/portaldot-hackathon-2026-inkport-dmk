@@ -1,15 +1,13 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import dynamic from 'next/dynamic';
 import { translate } from '@/lib/translator';
 import { readSSE } from '@/lib/sse';
 import type { SSEPayload } from '@/lib/sse';
+import FauxEditor from '@/components/FauxEditor';
 import { Stepper, CompilePanel, DeployPanel, CallPanel, Ic } from '@/components/Pipeline';
 import type { LogLine } from '@/components/Pipeline';
 import type { Metadata } from '@/lib/translator';
 import type { Statuses, CompileState, DeployState, CallPanelState } from '@/components/Pipeline';
-
-const FauxEditor = dynamic(() => import('@/components/FauxEditor'), { ssr: false });
 
 const DEFAULT_SOL = `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
