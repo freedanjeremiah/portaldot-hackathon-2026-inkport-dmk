@@ -4,7 +4,7 @@ export default function SiteFooter() {
       <div className="footer-inner">
         <div className="footer-brand">
           <span className="nav-mark" style={{ width: 22, height: 22 }}>
-            <img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
+            <img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#f4ecdb', borderRadius: 'inherit' }} />
           </span>
           <span>Ink<b style={{ color: 'var(--accent-3)' }}>Port</b></span>
         </div>
