@@ -1,0 +1,13 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "downRet", "args": [256], "expected": 0 },
+    { "action": "read", "message": "downRet", "args": [513], "expected": 1 },
+    { "action": "read", "message": "downRet", "args": [255], "expected": 255 },
+    { "action": "call", "message": "store", "args": [300] },
+    { "action": "read", "message": "get", "args": [], "expected": 44 },
+    { "action": "read", "message": "widen", "args": [200], "expected": 200 },
+    { "action": "read", "message": "downSigned", "args": [200], "expected": -56 }
+  ]
+}

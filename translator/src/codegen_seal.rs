@@ -387,17 +387,21 @@ impl<'a> SealCtx<'a> {
                     }
                 }
                 // `uintN(x)` / `intN(x)` where solang renders the callee as a
-                // `Type` node rather than a `Variable`.
-                if let Expression::Type(_, PtType::Uint(_)) = callee.as_ref() {
+                // `Type` node rather than a `Variable`. Narrowing casts (N<128)
+                // must truncate to N bits, matching Solidity's modulo-2^N
+                // semantics (`uint8(256) == 0`, `int8(200) == -56`).
+                if let Expression::Type(_, PtType::Uint(n)) = callee.as_ref() {
                     if let Some(a) = args.first() {
                         let (s, t) = self.expr_ty(a);
-                        return (coerce_num(&s, t, ValTy::Num), ValTy::Num);
+                        let v = coerce_num(&s, t, ValTy::Num);
+                        return (mask_narrow(&v, narrow_width(*n)), ValTy::Num);
                     }
                 }
-                if let Expression::Type(_, PtType::Int(_)) = callee.as_ref() {
+                if let Expression::Type(_, PtType::Int(n)) = callee.as_ref() {
                     if let Some(a) = args.first() {
                         let (s, t) = self.expr_ty(a);
-                        return (coerce_num(&s, t, ValTy::SNum), ValTy::SNum);
+                        let v = coerce_num(&s, t, ValTy::SNum);
+                        return (sign_extend_narrow(&v, narrow_width(*n)), ValTy::SNum);
                     }
                 }
                 if let Expression::Variable(id) = callee.as_ref() {
@@ -410,17 +414,20 @@ impl<'a> SealCtx<'a> {
                             return self.expr_ty(a);
                         }
                     }
-                    // intN(x) / uintN(x) casts: pass value, adjust kind.
-                    if id.name.starts_with("int") {
-                        if let Some(a) = args.first() {
-                            let (s, _) = self.expr_ty(a);
-                            return (format!("({s} as i128)"), ValTy::SNum);
-                        }
-                    }
+                    // intN(x) / uintN(x) casts: coerce kind and truncate to the
+                    // target width N for narrowing casts (N<128).
                     if id.name.starts_with("uint") {
                         if let Some(a) = args.first() {
-                            let (s, _) = self.expr_ty(a);
-                            return (format!("({s} as u128)"), ValTy::Num);
+                            let (s, t) = self.expr_ty(a);
+                            let v = coerce_num(&s, t, ValTy::Num);
+                            return (mask_narrow(&v, cast_name_width(&id.name)), ValTy::Num);
+                        }
+                    }
+                    if id.name.starts_with("int") {
+                        if let Some(a) = args.first() {
+                            let (s, t) = self.expr_ty(a);
+                            let v = coerce_num(&s, t, ValTy::SNum);
+                            return (sign_extend_narrow(&v, cast_name_width(&id.name)), ValTy::SNum);
                         }
                     }
                 }
@@ -1529,6 +1536,21 @@ fn signed_bounds(n: u32) -> (String, String) {
 fn mask_narrow(expr: &str, width: Option<u32>) -> String {
     match width {
         Some(n) => format!("(({expr}) & {}u128)", unsigned_mask(n)),
+        None => expr.to_string(),
+    }
+}
+
+/// Sign-extend a rendered i128 expression from its low N bits, used for signed
+/// narrowing casts `intN(x)` (N<128) which truncate modulo 2^N then reinterpret
+/// the low N bits as a two's-complement value (`int8(200) == -56`). Shift the
+/// sign bit (bit N-1) up to bit 127 then arithmetic-shift back. Wide width
+/// (`None`) is a no-op.
+fn sign_extend_narrow(expr: &str, width: Option<u32>) -> String {
+    match width {
+        Some(n) => {
+            let sh = 128 - n;
+            format!("((({expr}) << {sh}u32) >> {sh}u32)")
+        }
         None => expr.to_string(),
     }
 }
@@ -3760,6 +3782,62 @@ mod tests {
         );
         // The checked range-check form must NOT appear inside an unchecked block.
         assert!(!art.lib_rs.contains("if __r > 255u128"));
+    }
+
+    #[test]
+    fn explicit_narrow_uint_cast_masks_to_width() {
+        // uint8(x) must truncate to 8 bits (& 255), matching Solidity modulo-256.
+        let src = r#"
+            contract C {
+                function down(uint256 x) public pure returns (uint8) { return uint8(x); }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(
+            art.lib_rs.contains("& 255u128"),
+            "expected uint8 cast to mask with 255, got body:\n{}",
+            art.lib_rs
+        );
+    }
+
+    #[test]
+    fn explicit_narrow_int_cast_sign_extends() {
+        // int8(x) must sign-extend the low 8 bits: (<x> << 120) >> 120 on i128.
+        let src = r#"
+            contract C {
+                function down(int256 x) public pure returns (int8) { return int8(x); }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(
+            art.lib_rs.contains("<< 120u32) >> 120u32"),
+            "expected int8 cast to sign-extend from 8 bits, got body:\n{}",
+            art.lib_rs
+        );
+    }
+
+    #[test]
+    fn explicit_wide_uint256_cast_does_not_mask() {
+        // uint256(x) is a widening/identity cast and must not add a width mask.
+        let src = r#"
+            contract C {
+                function up(uint8 a) public pure returns (uint256) { return uint256(a); }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(
+            !art.lib_rs.contains("& 255u128"),
+            "uint256 cast must not mask, got body:\n{}",
+            art.lib_rs
+        );
+    }
+
+    #[test]
+    fn cast_width_helpers_round_trip() {
+        assert_eq!(mask_narrow("v", Some(8)), "((v) & 255u128)");
+        assert_eq!(mask_narrow("v", None), "v");
+        assert_eq!(sign_extend_narrow("v", Some(8)), "(((v) << 120u32) >> 120u32)");
+        assert_eq!(sign_extend_narrow("v", None), "v");
     }
 
     #[test]
