@@ -3,14 +3,23 @@ import fs from 'fs';
 import path from 'path';
 import { buildEnv } from '@/lib/env';
 import { sessionDir } from '@/lib/session';
-import { spawnCollect } from '@/lib/shell';
+import { spawnCollect, spawnLive } from '@/lib/shell';
 
 function parseName(solidity: string): string {
   const stripped = solidity
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')  // block comments
-    .replace(/\/\/[^\n]*/g, '');         // line comments
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, '');
   const m = /contract\s+([A-Za-z_]\w*)/.exec(stripped);
   return m ? m[1] : 'Contract';
+}
+
+function readCrateName(cargoTomlPath: string, fallback: string): string {
+  try {
+    const toml = fs.readFileSync(cargoTomlPath, 'utf8');
+    const line = toml.split('\n').find(l => l.trim().startsWith('name') && l.includes('='));
+    if (line) return line.split('=')[1].trim().replace(/"/g, '');
+  } catch { /* ignore */ }
+  return fallback;
 }
 
 export async function POST(request: NextRequest) {
@@ -46,11 +55,12 @@ export async function POST(request: NextRequest) {
         const solFile = path.join(tmpdir, `${name}.sol`);
         const buildDir = path.join(tmpdir, 'build', name);
 
+
         fs.mkdirSync(path.join(buildDir, 'src'), { recursive: true });
         fs.writeFileSync(solFile, solidity, 'utf8');
 
         // ── Step 1: translate ──────────────────────────────────────
-        emit({ type: 'log', cls: 'lg-cmd', text: `$ inkport-translate ${name}.sol --target seal --out build/${name}/` });
+        emit({ type: 'log', cls: 'lg-cmd', text: `$ inkport-translate ${name}.sol --target seal` });
 
         const translatorBin = path.join(inkportRoot, 'translator', 'target', 'release', 'inkport-translate');
         const tr = await spawnCollect(translatorBin, [solFile, '--target', 'seal', '--out', buildDir], { env });
@@ -62,31 +72,31 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        emit({ type: 'log', cls: 'lg-dim', text: `  wrote build/${name}/src/lib.rs` });
-        emit({ type: 'log', cls: 'lg-dim', text: `  wrote build/${name}/metadata.json` });
+        emit({ type: 'log', cls: 'lg-dim', text: `  wrote ${name}/src/lib.rs + Cargo.toml + metadata.json` });
         emit({ type: 'log', cls: '', text: '' });
 
         const metaPath = path.join(buildDir, 'metadata.json');
         const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-        const crateName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        const crateName = readCrateName(path.join(buildDir, 'Cargo.toml'), name.toLowerCase());
 
-        // ── Step 2: cargo build ────────────────────────────────────
+        // ── Step 2: cargo build (streaming) ───────────────────────
         emit({ type: 'log', cls: 'lg-cmd', text: '$ cargo +stable build --release --target wasm32-unknown-unknown' });
 
-        const cargo = await spawnCollect(
+        const cargo = await spawnLive(
           'cargo',
           ['+stable', 'build', '--release', '--target', 'wasm32-unknown-unknown'],
-          { cwd: buildDir, env }
+          {
+            cwd: buildDir,
+            env,
+            onLine: (line: string) => {
+              let cls = 'lg-dim';
+              if (/Finished/.test(line)) cls = 'lg-ok';
+              if (/Compiling/.test(line)) cls = 'lg-warn';
+              if (/^error/.test(line.trim())) cls = 'lg-err';
+              emit({ type: 'log', cls, text: line });
+            },
+          }
         );
-
-        // Emit every non-empty line from cargo output
-        const cargoLines = (cargo.stdout + cargo.stderr).split('\n').filter(l => l.trim());
-        for (const line of cargoLines) {
-          let cls = 'lg-dim';
-          if (/Finished/.test(line)) cls = 'lg-warn';
-          if (/^error/.test(line.trim())) cls = 'lg-err';
-          emit({ type: 'log', cls, text: line });
-        }
 
         if (cargo.code !== 0) {
           emit({ type: 'error', log: cargo.stderr });
@@ -98,9 +108,8 @@ export async function POST(request: NextRequest) {
         emit({ type: 'log', cls: '', text: '' });
         emit({ type: 'log', cls: 'lg-cmd', text: `$ strip_wasm ${name}.wasm` });
 
-        const rawWasm = path.join(
-          buildDir, 'target', 'wasm32-unknown-unknown', 'release', `${crateName}.wasm`
-        );
+        // Raw wasm sits in the default cargo target dir inside buildDir.
+        const rawWasm = path.join(buildDir, 'target', 'wasm32-unknown-unknown', 'release', `${crateName}.wasm`);
         const strippedWasm = path.join(buildDir, `${name}.wasm`);
 
         const stripScript = [
@@ -126,7 +135,7 @@ export async function POST(request: NextRequest) {
 
         const size = parseInt(strip.stdout.trim(), 10);
         const displaySize = isNaN(size) ? '?' : size.toLocaleString();
-        emit({ type: 'log', cls: 'lg-ok', text: `✓ ${name}.wasm — ${displaySize} bytes stripped (Portaldot-compatible)` });
+        emit({ type: 'log', cls: 'lg-ok', text: `✓ ${name}.wasm — ${displaySize} bytes (Portaldot-ready)` });
 
         // ── Done: base64-encode wasm, emit terminal event ──────────
         const wasmBytes = fs.readFileSync(strippedWasm);

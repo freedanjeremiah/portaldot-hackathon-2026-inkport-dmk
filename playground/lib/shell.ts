@@ -1,5 +1,10 @@
 import { spawn } from 'child_process';
 
+export interface SpawnLiveResult {
+  code: number;
+  stderr: string;
+}
+
 export interface SpawnResult {
   stdout: string;
   stderr: string;
@@ -14,7 +19,7 @@ export interface SpawnResult {
 //   \foo\bar     →  /foo/bar  (UNC-relative, rare)
 function toLinux(p: string): string {
   if (process.platform !== 'win32') return p;
-  const drive = p.match(/^([A-Za-z]):[\\\/](.*)/s);
+  const drive = p.match(/^([A-Za-z]):[\\\/](.*)/);
   if (drive) return `/mnt/${drive[1].toLowerCase()}/${drive[2].replace(/\\/g, '/')}`;
   return p.replace(/\\/g, '/');
 }
@@ -26,7 +31,16 @@ function buildWslArgs(cmd: string, args: string[], cwd?: string): { cmd: string;
   const normCwd = cwd ? toLinux(cwd) : undefined;
   const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
   const parts = [normCmd, ...normArgs].map(quote).join(' ');
-  const script = normCwd ? `cd ${quote(normCwd)} && ${parts}` : parts;
+
+  // Embed PATH setup in the bash script itself — WSL env inheritance from a
+  // Windows Node.js parent is unreliable. Source cargo's env script so `cargo`
+  // is findable, and prepend the venv's bin so `inkport`/`python3` are found.
+  const venv = process.env.INKPORT_VENV ? toLinux(process.env.INKPORT_VENV) : '';
+  const pathPrefix = venv ? `${venv}/bin:` : '';
+  const envSetup = `source "$HOME/.cargo/env" 2>/dev/null; export PATH="${pathPrefix}$HOME/.cargo/bin:$PATH"; `;
+
+  const body = normCwd ? `cd ${quote(normCwd)} && ${parts}` : parts;
+  const script = envSetup + body;
   return { cmd: 'wsl', args: ['bash', '-c', script], cwd: undefined };
 }
 
@@ -48,6 +62,46 @@ export function spawnCollect(
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
     proc.on('error', (err: Error) => resolve({ stdout, stderr: err.message, code: 1 }));
     proc.on('close', (code: number | null) => resolve({ stdout, stderr, code: code ?? 1 }));
+  });
+}
+
+export function spawnLive(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string, isStderr: boolean) => void }
+): Promise<SpawnLiveResult> {
+  const { cmd: realCmd, args: realArgs, cwd } = buildWslArgs(cmd, args, opts.cwd);
+  return new Promise((resolve) => {
+    const proc = spawn(realCmd, realArgs, {
+      cwd,
+      env: opts.env ?? process.env,
+      shell: false,
+    });
+    let stderr = '';
+    let outBuf = '';
+    let errBuf = '';
+
+    function flush(buf: string, isStderr: boolean): string {
+      const nl = buf.lastIndexOf('\n');
+      if (nl === -1) return buf;
+      buf.slice(0, nl).split('\n').forEach(line => {
+        if (line && opts.onLine) opts.onLine(line, isStderr);
+      });
+      return buf.slice(nl + 1);
+    }
+
+    proc.stdout.on('data', (d: Buffer) => { outBuf = flush(outBuf + d.toString(), false); });
+    proc.stderr.on('data', (d: Buffer) => {
+      const s = d.toString();
+      stderr += s;
+      errBuf = flush(errBuf + s, true);
+    });
+    proc.on('error', (err: Error) => resolve({ code: 1, stderr: err.message }));
+    proc.on('close', (code: number | null) => {
+      if (outBuf && opts.onLine) opts.onLine(outBuf, false);
+      if (errBuf && opts.onLine) opts.onLine(errBuf, true);
+      resolve({ code: code ?? 1, stderr });
+    });
   });
 }
 
