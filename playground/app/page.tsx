@@ -4,7 +4,7 @@ import { translate } from '@/lib/translator';
 import { readSSE } from '@/lib/sse';
 import type { SSEPayload } from '@/lib/sse';
 import FauxEditor from '@/components/FauxEditor';
-import { PipelineRail, Ic } from '@/components/Pipeline';
+import { PipelineSide, Ic } from '@/components/Pipeline';
 import type { LogLine } from '@/components/Pipeline';
 import type { Metadata } from '@/lib/translator';
 import type { Statuses, CompileState, DeployState, CallPanelState } from '@/components/Pipeline';
@@ -62,7 +62,6 @@ export default function PlaygroundPage() {
   const [wasmB64, setWasmB64] = useState<string | null>(null);
 
   const [active, setActive] = useState('compile');
-  const [leftPct, setLeftPct] = useState(50);
 
   const firstRef = useRef(true);
   const sessionIdRef = useRef<string>('');
@@ -234,26 +233,28 @@ export default function PlaygroundPage() {
     copy: (t: string) => { navigator.clipboard?.writeText(t); },
   };
 
-  /* drag: editor split */
-  const onDividerDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const startX = e.clientX, startPct = leftPct;
-    const w = (e.target as HTMLElement).closest('.editors')!.clientWidth;
-    const move = (ev: MouseEvent) => setLeftPct(Math.max(28, Math.min(72, startPct + ((ev.clientX - startX) / w) * 100)));
-    const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
-    document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-  };
-
   return (
     <div className="app">
+      {/* Inline burn SVG filter for the parchment torn-edge effect */}
+      <svg width="0" height="0" style={{ position: 'absolute', width: 0, height: 0 }}>
+        <defs>
+          <filter id="burn" x="-20%" y="-20%" width="140%" height="140%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.04 0.09" numOctaves="3" seed="11" result="n"/>
+            <feDisplacementMap in="SourceGraphic" in2="n" scale="8" xChannelSelector="R" yChannelSelector="G"/>
+          </filter>
+        </defs>
+      </svg>
+
+      <div className="pg-vignette" />
+
       <div className="topbar">
         <a href="/home" className="topbar-back">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M15 6l-6 6 6 6"/>
           </svg>
           InkPort
         </a>
-        <div className="topbar-divider" />
+        <div className="topbar-sep" />
         <div className="brand">
           <div className="brand-mark"><Ic.bolt width={13} height={13} /></div>
           <span className="brand-name">Ink<b>Port</b> Playground</span>
@@ -264,43 +265,39 @@ export default function PlaygroundPage() {
         <StatusBadge statuses={statuses} translating={translating} runningWhat={runningWhat} />
       </div>
 
-      <div className="main-area">
-        <div className="editors">
-          <div className="pane" style={{ width: leftPct + '%' }}>
-            <div className="pane-header">
-              <span className="pane-tab"><span className="dotfile">contracts/</span>{meta.name}.sol</span>
-              <span className="lang-chip">solidity</span>
-              <div className="ph-right"><span className="ro-tag">editable</span></div>
-            </div>
-            <FauxEditor value={solidity} onChange={setSolidity} language="solidity" readOnly={false} />
+      <div className="workspace">
+        <div className="pane">
+          <div className="pane-header">
+            <span className="pane-tab"><span className="dotfile">contracts/</span>{meta.name}.sol</span>
+            <span className="lang-chip">solidity</span>
+            <div className="ph-right"><span className="ro-tag">editable</span></div>
           </div>
+          <FauxEditor value={solidity} onChange={setSolidity} language="solidity" readOnly={false} />
+        </div>
 
-          <div className="divider" onMouseDown={onDividerDown} />
-
-          <div className="pane" style={{ width: (100 - leftPct) + '%', position: 'relative' }}>
-            <div className="pane-header">
-              <span className="pane-tab"><span className="dotfile">build/{meta.name}/src/</span>lib.rs</span>
-              <span className="lang-chip">rust · seal0</span>
-              <div className="ph-right">
-                {translating
-                  ? <span className="translate-flag"><span className="mini-spinner" />translating</span>
-                  : <span className="ro-tag">read-only · live</span>}
+        <div className="pane" style={{ position: 'relative' }}>
+          <div className="pane-header">
+            <span className="pane-tab"><span className="dotfile">build/{meta.name}/src/</span>lib.rs</span>
+            <span className="lang-chip">rust · seal0</span>
+            <div className="ph-right">
+              {translating
+                ? <span className="translate-flag"><span className="mini-spinner" />translating</span>
+                : <span className="ro-tag">read-only · live</span>}
+            </div>
+          </div>
+          <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
+            <FauxEditor value={rust} onChange={() => {}} language="rust" readOnly={true} />
+            {translateError && (
+              <div className="rust-error">
+                <div className="re-head"><Ic.cross width={13} height={13} /> translate error — Rust output is stale</div>
+                {translateError}
+                {'\n\n'}<span style={{ color: 'var(--text-faint)' }}>// editor is never blocked — fix the Solidity to regenerate</span>
               </div>
-            </div>
-            <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex' }}>
-              <FauxEditor value={rust} onChange={() => {}} language="rust" readOnly={true} />
-              {translateError && (
-                <div className="rust-error">
-                  <div className="re-head"><Ic.cross width={13} height={13} /> translate error — Rust output is stale</div>
-                  {translateError}
-                  {'\n\n'}<span style={{ color: 'var(--text-faint)' }}>// editor is never blocked — fix the Solidity to regenerate</span>
-                </div>
-              )}
-            </div>
+            )}
           </div>
         </div>
 
-        <PipelineRail bus={bus} active={active} onSelect={setActive} translateError={translateError} />
+        <PipelineSide bus={bus} active={active} onSelect={setActive} />
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 'use client';
-import { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import type { Metadata, MetadataMessage } from '@/lib/translator';
 export type LogSegment = [string, string];
 export type LogLine = LogSegment[];
@@ -494,7 +494,79 @@ export function PipelineRail({ bus, active, onSelect, translateError }: {
   );
 }
 
-// ─── Legacy panels (kept for reference, no longer rendered) ──────────────────
+// ─── PipelineSide (Forge / parchment accordion sidebar) ──────────────────────
+
+const STAGE_DEFS_PS = [
+  { key: 'translate', name: 'Translate', sub: 'solang → IR → seal0' },
+  { key: 'compile',   name: 'Compile',   sub: 'cargo build → wasm' },
+  { key: 'deploy',    name: 'Deploy',    sub: 'instantiate_with_code' },
+  { key: 'call',      name: 'Call',      sub: 'Contracts.call' },
+] as const;
+
+const PS_ICONS: Record<string, (p: React.SVGProps<SVGSVGElement>) => JSX.Element> = {
+  translate: Ic.translate,
+  compile:   Ic.compile,
+  deploy:    Ic.deploy,
+  call:      Ic.call,
+};
+
+function psLabel(status: StageStatus, key: string): string {
+  if (key === 'translate') {
+    return ({ running: 'translating…', done: 'live', failed: 'parse error', disabled: 'idle' } as Record<string, string>)[status] ?? 'idle';
+  }
+  return ({ disabled: 'locked', ready: 'ready', running: 'running…', done: 'done', failed: 'failed' } as Record<string, string>)[status] ?? 'idle';
+}
+
+export function PipelineSide({ bus, active, onSelect }: {
+  bus: Bus;
+  active: string;
+  onSelect: (k: string) => void;
+}) {
+  const statuses = bus.statuses;
+  const Panel = active === 'deploy' ? DeployPanel : active === 'call' ? CallPanel : CompilePanel;
+
+  return (
+    <aside className="pipeline-side">
+      <div className="ps-head">
+        <Ic.bolt width={15} height={15} />
+        Pipeline
+      </div>
+      <div className="ps-stages">
+        {STAGE_DEFS_PS.map((s, i) => {
+          const st = statuses[s.key as keyof Statuses];
+          const clickable = s.key !== 'translate' && st !== 'disabled' && st !== 'running';
+          const isActive = active === s.key;
+          const NodeIcon = PS_ICONS[s.key] ?? Ic.compile;
+          const cls = ['ps-stage', st, isActive ? 'active' : '', clickable ? 'clickable' : ''].filter(Boolean).join(' ');
+          return (
+            <React.Fragment key={s.key}>
+              <div className={cls}>
+                <div className="ps-stage-row" onClick={() => clickable && onSelect(s.key)}>
+                  <div className="ps-node">
+                    {st === 'done' ? <Ic.check /> : st === 'failed' ? <Ic.cross /> : <NodeIcon />}
+                  </div>
+                  <div className="ps-meta">
+                    <div className="ps-name">{s.name}</div>
+                    <div className="ps-sub">{s.sub}</div>
+                  </div>
+                  <div className={`ps-badge b-${st}`}>{psLabel(st, s.key)}</div>
+                </div>
+                {isActive && s.key !== 'translate' && (
+                  <div className="ps-panel"><Panel bus={bus} /></div>
+                )}
+              </div>
+              {i < STAGE_DEFS_PS.length - 1 && (
+                <div className={`ps-conn${statuses[s.key as keyof Statuses] === 'done' ? ' filled' : ''}`} />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </aside>
+  );
+}
+
+// ─── Legacy panels (kept for backwards compat) ───────────────────────────────
 export function CallPanel({ bus }: { bus: Bus }) {
   const cl = bus.call, meta = bus.metadata;
   const [open, setOpen] = useState(false);
