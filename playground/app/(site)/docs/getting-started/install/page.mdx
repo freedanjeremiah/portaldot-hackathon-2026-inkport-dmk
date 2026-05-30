@@ -1,0 +1,50 @@
+export const metadata = { title: 'Install — InkPort Docs' };
+
+<div className="docs-tag">Getting Started</div>
+
+# Install
+
+**Prerequisites:** rustup (stable channel), Python 3.11.
+
+## 1. Install the wasm32 target
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+## 2. Build the Rust translator
+
+```bash
+source "$HOME/.cargo/env"
+cd translator && cargo build --release
+```
+
+The binary is placed at `translator/target/release/inkport-translate`. The CLI discovers it automatically.
+
+## 3. Install the Python CLI
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e inkport
+```
+
+This installs the `inkport` command and its chain client (`substrate-interface` included).
+
+## 4. Verify
+
+```bash
+inkport --help
+# → translate  build  deploy  call  test  all
+```
+
+## Environment
+
+Both `source` commands must be active in your shell before running any `inkport` command:
+
+```bash
+source "$HOME/.cargo/env"                              # Rust
+source /path/to/inkport/.venv/bin/activate             # Python
+```
+
+Add them to your shell profile (`~/.bashrc` / `~/.zshrc`) or a `direnv` setup.

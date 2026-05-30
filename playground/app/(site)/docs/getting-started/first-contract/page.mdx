@@ -1,0 +1,75 @@
+export const metadata = { title: 'First Contract — InkPort Docs' };
+
+<div className="docs-tag">Getting Started</div>
+
+# Your first contract
+
+A complete Counter contract from Solidity to on-chain in 4 commands.
+
+## 1. Write the contract
+
+`contracts/Counter.sol`:
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract Counter {
+    uint256 private count;
+
+    constructor(uint256 initial) {
+        count = initial;
+    }
+
+    function inc() public {
+        count += 1;
+    }
+
+    function get() public view returns (uint256) {
+        return count;
+    }
+}
+```
+
+## 2. Translate to seal0 Rust
+
+```bash
+inkport translate contracts/Counter.sol
+```
+
+Output:
+```
+build/Counter/src/lib.rs        ← generated seal0 Rust
+build/Counter/metadata.json     ← selectors, args, return types
+```
+
+## 3. Build to wasm
+
+```bash
+inkport build Counter
+```
+
+Output:
+```
+build/Counter/Counter.wasm      ← stripped MVP wasm
+```
+
+## 4. Deploy
+
+```bash
+inkport deploy Counter --arg 0
+# → deployed Counter -> 5D…
+```
+
+## 5. Call and read
+
+```bash
+inkport call Counter inc
+# → (mutating extrinsic, no return)
+
+inkport call Counter get
+# → 1
+```
+
+## What just happened
+
+`translate` parsed the Solidity AST, mapped types (`uint256` → `u128`), and emitted a `#![no_std]` Rust crate that imports the node's seal0 host functions. `build` ran `cargo +stable build --target wasm32-unknown-unknown` and stripped the result to MVP wasm. `deploy` called `instantiate_with_code` on the Portaldot node. `call` submitted a `Contracts.call` extrinsic.

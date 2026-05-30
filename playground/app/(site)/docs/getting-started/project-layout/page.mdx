@@ -1,0 +1,50 @@
+export const metadata = { title: 'Project Layout — InkPort Docs' };
+
+<div className="docs-tag">Getting Started</div>
+
+# Project layout
+
+```
+inkport/
+  contracts/          Solidity source files (.sol)
+  tests/              On-chain test specs (<Name>.json)
+  build/              Generated (gitignored)
+    <Name>/
+      src/lib.rs      Generated seal0 Rust
+      metadata.json   Selectors, args, return types
+      <Name>.wasm     Stripped MVP wasm
+  translator/         Rust crate: solang-parser → seal0 codegen
+  inkport/            Python CLI package (inkport command)
+  inkport_chain/      Chain client: deploy, call, test harness
+  deployments/        Deployed addresses (portaldot.json)
+  inkport.config.py   Network + signer configuration
+  docs/               Documentation
+```
+
+| Path | Role |
+|---|---|
+| `translator/src/parse.rs` | solang-parser AST ingestion, inheritance flattening |
+| `translator/src/lower.rs` | AST → IR |
+| `translator/src/codegen_seal.rs` | IR → seal0 Rust + metadata.json |
+| `inkport/inkport/cli.py` | typer CLI: translate/build/deploy/call/test/all |
+| `inkport/inkport/pipeline.py` | Path resolution, binary discovery, arg coercion |
+| `inkport_chain/portaldot.py` | Deploy/call/read over substrate-interface with reconnect |
+| `inkport_chain/strip_wasm.py` | MVP-wasm stripper (removes bulk-memory, unknown exports) |
+| `inkport_chain/test_contract.py` | Metadata-driven encode/decode + assertion harness |
+
+## inkport.config.py
+
+```python
+config = {
+    "networks": {
+        "portaldot": {
+            "url": "wss://portaldot.philotheephilix.in",
+            "decimals": 14,
+            "ss58": 42,
+        },
+    },
+    "default_signer": "//Alice",
+}
+```
+
+The CLI reads this file from the repo root. `//Alice`, `//Bob`, `//Charlie` are accepted as signers — they resolve to the 32-byte AccountId of the pre-funded dev accounts.
