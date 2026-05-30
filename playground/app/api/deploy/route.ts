@@ -1,19 +1,84 @@
-/* POST /api/deploy — instantiate_with_code on Portaldot, returns contract address.
-   Body: { wasmB64: string, metadata: object, args: string[], sessionId: string }
-   Streams SSE log lines, then emits { type:"address", address: string } on success.
+import { NextRequest } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import { buildEnv } from '@/lib/env';
+import { spawnCollect } from '@/lib/shell';
 
-   Wire this by calling portaldot.py's deploy() with the decoded wasm and encoded ctor args. */
-export async function POST(_request: Request) {
+export async function POST(request: NextRequest) {
+  const { wasmB64, metadata, args } = await request.json() as {
+    wasmB64: string;
+    metadata: { name: string; [k: string]: unknown };
+    args: string[];
+  };
+
   const encoder = new TextEncoder();
-  const body = new ReadableStream({
-    start(controller) {
-      const msg = JSON.stringify({ type: 'log', cls: 'lg-err', text: 'Backend not connected. Run the playground on the same machine as inkport.' });
-      controller.enqueue(encoder.encode('data: ' + msg + '\n\n'));
-      controller.enqueue(encoder.encode('data: ' + JSON.stringify({ type: 'error', log: 'Backend not connected' }) + '\n\n'));
+  const name = metadata.name;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      function emit(obj: object) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      }
+
+      try {
+        const env = buildEnv();
+        const inkportRoot = env.INKPORT_ROOT as string;
+
+        // Write wasm + metadata to INKPORT_ROOT/build/<name>/ where inkport deploy expects them
+        const buildDir = path.join(inkportRoot, 'build', name);
+        fs.mkdirSync(path.join(buildDir, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(buildDir, `${name}.wasm`), Buffer.from(wasmB64, 'base64'));
+        fs.writeFileSync(path.join(buildDir, 'metadata.json'), JSON.stringify(metadata, null, 2));
+
+        const argStr = (args ?? []).map(a => `--arg ${a}`).join(' ');
+        emit({ type: 'log', cls: 'lg-cmd', text: `$ inkport deploy ${name} ${argStr}` });
+
+        const argFlags = (args ?? []).flatMap(a => ['--arg', String(a)]);
+        const result = await spawnCollect(
+          'inkport',
+          ['deploy', name, ...argFlags],
+          { cwd: inkportRoot, env }
+        );
+
+        // Emit output lines
+        const allOutput = result.stdout + result.stderr;
+        for (const line of allOutput.split('\n').filter(l => l.trim())) {
+          let cls = 'lg-dim';
+          if (/deployed|✓/.test(line)) cls = 'lg-ok';
+          if (/error|Error/.test(line)) cls = 'lg-err';
+          if (/⛏|block #/.test(line)) cls = 'lg-warn';
+          emit({ type: 'log', cls, text: line });
+        }
+
+        if (result.code !== 0) {
+          emit({ type: 'error', log: (result.stderr || result.stdout).trim() });
+          controller.close();
+          return;
+        }
+
+        // Parse address: "deployed <Name> -> <SS58addr>"
+        const addrMatch = /deployed\s+\S+\s+->\s+(\S+)/.exec(result.stdout);
+        if (!addrMatch) {
+          emit({ type: 'error', log: 'Could not parse deployed address from inkport output' });
+          controller.close();
+          return;
+        }
+
+        emit({ type: 'address', address: addrMatch[1] });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        emit({ type: 'error', log: msg });
+      }
+
       controller.close();
-    }
+    },
   });
-  return new Response(body, {
-    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' }
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
   });
 }
