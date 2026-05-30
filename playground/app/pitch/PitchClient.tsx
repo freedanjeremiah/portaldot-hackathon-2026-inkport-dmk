@@ -19,6 +19,21 @@ export default function PitchClient() {
     };
     rafId = requestAnimationFrame(loop);
 
+    // Lenis caps scroll at the content height it measured on mount. Fonts/layout
+    // settle a beat later, so recompute the limit or scrolling stops mid-page.
+    const resize = () => lenis.resize();
+    const timers = [
+      setTimeout(resize, 50),
+      setTimeout(resize, 300),
+      setTimeout(resize, 800),
+      setTimeout(resize, 1600),
+    ];
+    window.addEventListener("load", resize);
+    window.addEventListener("resize", resize);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize);
+    const ro = new ResizeObserver(resize);
+    ro.observe(document.body);
+
     const slides = Array.from(document.querySelectorAll<HTMLElement>(".slide"));
     const bar = document.getElementById("p-bar");
     const nav = document.getElementById("p-nav");
@@ -78,6 +93,10 @@ export default function PitchClient() {
 
     return () => {
       cancelAnimationFrame(rafId);
+      timers.forEach(clearTimeout);
+      window.removeEventListener("load", resize);
+      window.removeEventListener("resize", resize);
+      ro.disconnect();
       io.disconnect();
       window.removeEventListener("keydown", onKey);
       lenis.destroy();
