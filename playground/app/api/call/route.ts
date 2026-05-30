@@ -3,11 +3,12 @@ import { buildEnv } from '@/lib/env';
 import { spawnCollect } from '@/lib/shell';
 
 export async function POST(request: NextRequest) {
-  const { metadata, message, args } = await request.json() as {
-    metadata: { name: string };
-    message: string;
-    args: string[];
-  };
+  const body = await request.json() as { metadata?: { name: string }; message?: string; args?: string[] };
+  const { metadata, message, args } = body;
+
+  if (!metadata?.name || !message) {
+    return NextResponse.json({ error: 'Missing metadata.name or message' }, { status: 400 });
+  }
 
   const name = metadata.name;
   const env = buildEnv();

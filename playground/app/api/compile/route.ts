@@ -14,7 +14,17 @@ function parseName(solidity: string): string {
 }
 
 export async function POST(request: NextRequest) {
-  const { solidity, sessionId } = await request.json() as { solidity: string; sessionId: string };
+  const body = await request.json() as { solidity?: string; sessionId?: string };
+  const { solidity, sessionId } = body;
+
+  if (!solidity || !sessionId) {
+    const encoder = new TextEncoder();
+    const msg = JSON.stringify({ type: 'error', log: 'Missing solidity or sessionId' });
+    return new Response(`data: ${msg}\n\n`, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+    });
+  }
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream<Uint8Array>({

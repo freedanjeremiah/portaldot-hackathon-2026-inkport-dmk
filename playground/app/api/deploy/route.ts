@@ -5,13 +5,18 @@ import { buildEnv } from '@/lib/env';
 import { spawnCollect } from '@/lib/shell';
 
 export async function POST(request: NextRequest) {
-  const { wasmB64, metadata, args } = await request.json() as {
-    wasmB64: string;
-    metadata: { name: string; [k: string]: unknown };
-    args: string[];
-  };
+  const body = await request.json() as { wasmB64?: string; metadata?: { name: string; [k: string]: unknown }; args?: string[] };
+  const { wasmB64, metadata, args } = body;
 
   const encoder = new TextEncoder();
+
+  if (!wasmB64 || !metadata?.name) {
+    const msg = JSON.stringify({ type: 'error', log: 'Missing wasmB64 or metadata' });
+    return new Response(`data: ${msg}\n\n`, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+    });
+  }
+
   const name = metadata.name;
 
   const stream = new ReadableStream<Uint8Array>({
