@@ -140,6 +140,12 @@ export default function PlaygroundPage() {
               setWasmB64(wasm);
               setMetadata(metaPayload);
               setCompile(c => ({ ...c, running: false, wasmSize: sz }));
+              // Pre-fill deploy args with type-appropriate defaults so the
+              // user can click Deploy immediately without hitting an arg-count error.
+              const ctorArgs = metaPayload.constructor?.args ?? [];
+              const defaultFor = (t: string) =>
+                t === 'bool' ? 'false' : t === 'address' ? '//Alice' : t === 'string' ? '' : '0';
+              setDeploy(d => ({ ...d, args: ctorArgs.map(defaultFor) }));
               setActive('deploy');
             }
           },

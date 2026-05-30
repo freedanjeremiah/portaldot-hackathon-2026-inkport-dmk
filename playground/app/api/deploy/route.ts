@@ -37,10 +37,13 @@ export async function POST(request: NextRequest) {
         fs.writeFileSync(path.join(buildDir, `${name}.wasm`), Buffer.from(wasmB64, 'base64'));
         fs.writeFileSync(path.join(buildDir, 'metadata.json'), JSON.stringify(metadata, null, 2));
 
-        const argStr = (args ?? []).map(a => `--arg ${a}`).join(' ');
-        emit({ type: 'log', cls: 'lg-cmd', text: `$ inkport deploy ${name} ${argStr}` });
+        // Replace empty-string args with '0' so a user who leaves a numeric
+        // field blank still gets a valid deploy (coerce_args rejects empty strings).
+        const cleanArgs = (args ?? []).map(a => (String(a).trim() === '' ? '0' : String(a)));
+        const argStr = cleanArgs.map(a => `--arg ${a}`).join(' ');
+        emit({ type: 'log', cls: 'lg-cmd', text: `$ inkport deploy ${name} ${argStr}`.trim() });
 
-        const argFlags = (args ?? []).flatMap(a => ['--arg', String(a)]);
+        const argFlags = cleanArgs.flatMap(a => ['--arg', a]);
         const result = await spawnCollect(
           'inkport',
           ['deploy', name, ...argFlags],
