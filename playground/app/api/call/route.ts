@@ -1,11 +1,45 @@
-/* POST /api/call — Contracts.call (mutating extrinsic) or dry-run (view).
-   Body: { address: string, metadata: object, message: string, args: string[], sessionId: string }
-   Returns: { result: any, events: object[] } or { error: string }
+import { NextRequest, NextResponse } from 'next/server';
+import { buildEnv } from '@/lib/env';
+import { spawnCollect } from '@/lib/shell';
 
-   Wire this by calling portaldot.py's call()/dry-run() with SCALE-encoded args decoded via test_contract.py. */
-export async function POST(_request: Request) {
-  return Response.json(
-    { error: 'Backend not connected. Run the playground on the same machine as inkport.' },
-    { status: 501 }
+export async function POST(request: NextRequest) {
+  const { metadata, message, args } = await request.json() as {
+    metadata: { name: string };
+    message: string;
+    args: string[];
+  };
+
+  const name = metadata.name;
+  const env = buildEnv();
+  const inkportRoot = env.INKPORT_ROOT as string;
+
+  const argFlags = (args ?? []).flatMap(a => ['--arg', String(a)]);
+
+  const result = await spawnCollect(
+    'inkport',
+    ['call', name, message, ...argFlags],
+    { cwd: inkportRoot, env }
   );
+
+  if (result.code !== 0) {
+    return NextResponse.json(
+      { error: (result.stderr || result.stdout).trim() },
+      { status: 400 }
+    );
+  }
+
+  // inkport call prints: "call Name.msg(...) -> <value>"
+  // followed by a JSON line: {"result": <value>}
+  let parsed: unknown = null;
+  try {
+    const jsonLine = result.stdout.split('\n').find(l => l.trim().startsWith('{'));
+    if (jsonLine) parsed = (JSON.parse(jsonLine) as { result: unknown }).result;
+  } catch { /* ignore */ }
+
+  if (parsed === null) {
+    const match = /call\s+\S+\s+->\s+(.+)/.exec(result.stdout);
+    parsed = match ? match[1].trim() : 'ok';
+  }
+
+  return NextResponse.json({ result: parsed, events: [] });
 }
