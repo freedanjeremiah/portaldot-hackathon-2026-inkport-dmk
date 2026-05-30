@@ -1,6 +1,6 @@
 use solang_parser::pt::{
     ContractDefinition, ContractPart, Expression, FunctionAttribute, FunctionTy,
-    Mutability as PtMutability, Statement, Type as PtType,
+    Mutability as PtMutability, Statement, Type as PtType, VariableAttribute, Visibility,
 };
 use crate::ir::{Event, EventField, ErrorVariant, Field, Function, Mutability, Param, Type};
 use crate::types::map_elementary;
@@ -13,7 +13,7 @@ pub fn map_type(expr: &Expression, uint_strategy: &str) -> Option<Type> {
             PtType::Address | PtType::AddressPayable => Some(Type::AccountId),
             PtType::String => Some(Type::String),
             PtType::Uint(_) => Some(if uint_strategy == "u256" { Type::U256 } else { Type::U128 }),
-            PtType::Int(_) => Some(if uint_strategy == "u256" { Type::U256 } else { Type::U128 }),
+            PtType::Int(_) => Some(Type::I128),
             PtType::Bytes(_) | PtType::DynamicBytes => Some(Type::Bytes),
             PtType::Mapping { key, value, .. } => {
                 let k = map_type(key, uint_strategy)?;
@@ -34,7 +34,10 @@ pub fn lower_storage(def: &ContractDefinition, uint_strategy: &str) -> Vec<Field
         if let ContractPart::VariableDefinition(v) = part {
             if let Some(ty) = map_type(&v.ty, uint_strategy) {
                 if let Some(name) = &v.name {
-                    out.push(Field { name: name.name.clone(), ty });
+                    let public = v.attrs.iter().any(|a| {
+                        matches!(a, VariableAttribute::Visibility(Visibility::Public(_)))
+                    });
+                    out.push(Field { name: name.name.clone(), ty, public });
                 }
             }
         }
@@ -121,7 +124,7 @@ pub fn lower_functions(
                         name: "new".into(),
                         mutability,
                         params,
-                        returns: None,
+                        returns: vec![],
                         body: vec![],
                     });
                 }
@@ -143,12 +146,12 @@ pub fn lower_functions(
                         })
                         .collect();
 
-                    let returns: Option<Type> = f
+                    let returns: Vec<Type> = f
                         .returns
                         .iter()
                         .filter_map(|(_, opt_p)| opt_p.as_ref())
                         .filter_map(|p| map_type(&p.ty, uint_strategy))
-                        .next();
+                        .collect();
 
                     let mutability = infer_mutability(&f.attributes);
 
@@ -163,6 +166,39 @@ pub fn lower_functions(
                 // Fallback, receive, modifier — skip
                 _ => {}
             }
+        }
+    }
+
+    // Synthesize auto-getters for `public` scalar storage variables, unless a
+    // function of the same name already exists. Solidity generates a parameter-
+    // less getter returning the variable's value for `public` state vars.
+    for part in &def.parts {
+        if let ContractPart::VariableDefinition(v) = part {
+            let is_public = v.attrs.iter().any(|a| {
+                matches!(a, VariableAttribute::Visibility(Visibility::Public(_)))
+            });
+            if !is_public {
+                continue;
+            }
+            let (name, ty) = match (&v.name, map_type(&v.ty, uint_strategy)) {
+                (Some(id), Some(ty)) => (id.name.clone(), ty),
+                _ => continue,
+            };
+            // Only scalar getters are synthesized (mapping getters take a key
+            // arg; out of scope for the spec fixtures).
+            if matches!(ty, Type::Mapping(_, _)) {
+                continue;
+            }
+            if messages.iter().any(|m| m.name == name) {
+                continue;
+            }
+            messages.push(Function {
+                name,
+                mutability: Mutability::View,
+                params: vec![],
+                returns: vec![ty],
+                body: vec![],
+            });
         }
     }
 

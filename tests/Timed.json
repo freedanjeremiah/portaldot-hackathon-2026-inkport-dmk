@@ -1,0 +1,7 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "afterStart", "args": [], "expected": true }
+  ]
+}

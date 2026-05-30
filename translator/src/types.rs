@@ -10,6 +10,7 @@ pub fn map_elementary(name: &str, uint_strategy: &str) -> Option<Type> {
         n if n.starts_with("uint") => {
             Some(if uint_strategy == "u256" { Type::U256 } else { Type::U128 })
         }
+        n if n.starts_with("int") => Some(Type::I128),
         _ => None,
     }
 }

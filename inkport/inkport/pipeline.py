@@ -50,7 +50,17 @@ def _snake(name: str) -> str:
             out.append(ch.lower())
         else:
             out.append(ch)
-    return "".join(out)
+    name = "".join(out)
+    _kw = {
+        "as", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+        "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static",
+        "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+        "while", "async", "await", "abstract",
+    }
+    if name in _kw:
+        name += "_contract"
+    return name
 
 
 def build_dir(root: Path, name: str) -> Path:
@@ -123,7 +133,7 @@ def pubkey(suri_or_hex: str) -> str:
 def coerce_arg(ty: str, value: Any) -> Any:
     if ty == "address":
         return pubkey(value)
-    if ty == "u128":
+    if ty in ("u128", "i128"):
         return int(value)
     if ty == "bool":
         if isinstance(value, bool):
@@ -140,9 +150,12 @@ def coerce_args(arg_types: list[str], raw: list[Any]) -> list[Any]:
     return [coerce_arg(t, v) for t, v in zip(arg_types, raw)]
 
 
-def coerce_expected(ret_ty: Optional[str], value: Any) -> Any:
+def coerce_expected(ret_ty: Any, value: Any) -> Any:
     if ret_ty is None:
         return None
+    # Multi-return: ret_ty is a list of scalar types; expected is a list/tuple.
+    if isinstance(ret_ty, (list, tuple)):
+        return tuple(coerce_arg(t, v) for t, v in zip(ret_ty, value))
     return coerce_arg(ret_ty, value)
 
 

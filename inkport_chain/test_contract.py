@@ -32,6 +32,8 @@ def encode_arg(ty, value):
         return bytes([1 if value else 0])
     if ty == "u128":
         return int(value).to_bytes(16, "little")
+    if ty == "i128":
+        return int(value).to_bytes(16, "little", signed=True)
     if ty == "address":
         # value is 32 raw bytes or hex
         if isinstance(value, str):
@@ -41,16 +43,36 @@ def encode_arg(ty, value):
     raise ValueError(f"unknown arg type {ty}")
 
 
-def decode_ret(ty, raw):
-    if ty is None:
-        return None
+def _scalar_len(ty):
+    return 32 if ty == "address" else (1 if ty == "bool" else 16)
+
+
+def _decode_scalar(ty, raw):
     if ty == "bool":
         return raw[0] != 0 if raw else False
     if ty == "u128":
         return int.from_bytes(raw[:16], "little") if raw else 0
+    if ty == "i128":
+        # 16-byte LE two's-complement.
+        return int.from_bytes(raw[:16], "little", signed=True) if raw else 0
     if ty == "address":
         return "0x" + raw[:32].hex() if raw else "0x" + "00" * 32
     raise ValueError(f"unknown ret type {ty}")
+
+
+def decode_ret(ty, raw):
+    if ty is None:
+        return None
+    # Multi-return: `ty` is a list of scalar types; decode SCALE-concat -> tuple.
+    if isinstance(ty, (list, tuple)):
+        out = []
+        off = 0
+        for t in ty:
+            n = _scalar_len(t)
+            out.append(_decode_scalar(t, raw[off:off + n]))
+            off += n
+        return tuple(out)
+    return _decode_scalar(ty, raw)
 
 
 def decode_event(fields, data):

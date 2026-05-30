@@ -1,0 +1,8 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "mask", "args": [511], "expected": 255 },
+    { "action": "read", "message": "shl", "args": [3], "expected": 12 }
+  ]
+}

@@ -79,7 +79,7 @@ fn lowers_function_signatures() {
     let balance_of = messages.iter().find(|f| f.name == "balanceOf").unwrap();
     assert_eq!(balance_of.mutability, Mutability::View);
     assert_eq!(balance_of.params.len(), 1);
-    assert!(balance_of.returns.is_some());
+    assert!(!balance_of.returns.is_empty());
     let transfer = messages.iter().find(|f| f.name == "transfer").unwrap();
     assert_eq!(transfer.mutability, Mutability::Mutating);
     assert_eq!(transfer.params.len(), 2);

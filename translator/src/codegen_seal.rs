@@ -32,6 +32,8 @@ use crate::lower::map_type;
 enum ValTy {
     /// `u128` numeric value (uintN).
     Num,
+    /// `i128` signed numeric value (intN). Stored as 16-byte LE two's complement.
+    SNum,
     /// `bool`.
     Bool,
     /// `[u8; 32]` AccountId / address.
@@ -43,8 +45,14 @@ impl ValTy {
         match t {
             Type::Bool => ValTy::Bool,
             Type::AccountId => ValTy::Addr,
+            Type::I128 => ValTy::SNum,
             _ => ValTy::Num,
         }
+    }
+
+    /// Is this a numeric (signed or unsigned) kind?
+    fn is_numeric(self) -> bool {
+        matches!(self, ValTy::Num | ValTy::SNum)
     }
 }
 
@@ -53,10 +61,11 @@ impl ValTy {
 enum SlotKind {
     /// A scalar value of the given runtime kind.
     Scalar(ValTy),
-    /// `mapping(K => V)`.
-    Map { val: ValTy },
+    /// `mapping(K => V)`. `key` is the key's runtime kind (Addr = 32 bytes,
+    /// Num/SNum = 16-byte LE, Bool = 1 byte).
+    Map { key: ValTy, val: ValTy },
     /// `mapping(A => mapping(B => V))`.
-    Map2 { val: ValTy },
+    Map2 { key1: ValTy, key2: ValTy, val: ValTy },
 }
 
 /// A storage field with its assigned slot index.
@@ -85,6 +94,9 @@ struct Uses {
     blake2: bool,
     deposit_event: bool,
     transfer: bool,
+    now: bool,
+    block_number: bool,
+    balance: bool,
 }
 
 /// Lowering context for seal0 statement/expression generation.
@@ -95,6 +107,9 @@ struct SealCtx<'a> {
     locals: BTreeMap<String, ValTy>,
     uses: Uses,
     errors: Vec<String>,
+    /// Declared return kinds, used to lower tuple `return (a, b)` statements
+    /// for multi-return functions.
+    ret_kinds: Vec<ValTy>,
 }
 
 impl<'a> SealCtx<'a> {
@@ -105,6 +120,7 @@ impl<'a> SealCtx<'a> {
             locals: BTreeMap::new(),
             uses: Uses::default(),
             errors: Vec::new(),
+            ret_kinds: Vec::new(),
         }
     }
 
@@ -129,7 +145,12 @@ impl<'a> SealCtx<'a> {
             Expression::Variable(id) => {
                 if let Some(slot) = self.slot_of(&id.name) {
                     if let SlotKind::Scalar(vt) = slot.kind {
-                        return (format!("load_slot_{}()", slot.index), vt);
+                        // Signed scalars are stored as u128 bit patterns.
+                        let read = match vt {
+                            ValTy::SNum => format!("(load_slot_{}() as i128)", slot.index),
+                            _ => format!("load_slot_{}()", slot.index),
+                        };
+                        return (read, vt);
                     }
                     // A bare mapping name in value position is unsupported.
                     return (self.err("mapping used as value"), ValTy::Num);
@@ -152,11 +173,11 @@ impl<'a> SealCtx<'a> {
                 (format!("!({s})"), ValTy::Bool)
             }
 
-            Expression::Add(_, l, r) => (self.arith(l, r, "checked_add"), ValTy::Num),
-            Expression::Subtract(_, l, r) => (self.arith(l, r, "checked_sub"), ValTy::Num),
-            Expression::Multiply(_, l, r) => (self.arith(l, r, "checked_mul"), ValTy::Num),
-            Expression::Divide(_, l, r) => (self.arith(l, r, "checked_div"), ValTy::Num),
-            Expression::Modulo(_, l, r) => (self.arith(l, r, "checked_rem"), ValTy::Num),
+            Expression::Add(_, l, r) => self.arith(l, r, "checked_add"),
+            Expression::Subtract(_, l, r) => self.arith(l, r, "checked_sub"),
+            Expression::Multiply(_, l, r) => self.arith(l, r, "checked_mul"),
+            Expression::Divide(_, l, r) => self.arith(l, r, "checked_div"),
+            Expression::Modulo(_, l, r) => self.arith(l, r, "checked_rem"),
 
             Expression::Less(_, l, r) => (self.cmp(l, r, "<"), ValTy::Bool),
             Expression::More(_, l, r) => (self.cmp(l, r, ">"), ValTy::Bool),
@@ -182,6 +203,7 @@ impl<'a> SealCtx<'a> {
                     let key_expr = self.map_key_call(slot_idx, &keys);
                     let getter = match val {
                         ValTy::Bool => format!("map_get_bool({key_expr})"),
+                        ValTy::SNum => format!("(map_get_u128({key_expr}) as i128)"),
                         _ => format!("map_get_u128({key_expr})"),
                     };
                     (getter, val)
@@ -200,6 +222,30 @@ impl<'a> SealCtx<'a> {
                         self.uses.value = true;
                         return ("value()".to_string(), ValTy::Num);
                     }
+                    // block.timestamp / block.number
+                    if id.name == "block" {
+                        if member.name == "timestamp" {
+                            self.uses.now = true;
+                            return ("block_timestamp()".to_string(), ValTy::Num);
+                        }
+                        if member.name == "number" {
+                            self.uses.block_number = true;
+                            return ("block_number()".to_string(), ValTy::Num);
+                        }
+                    }
+                }
+                // address(this).balance
+                if member.name == "balance" {
+                    if let Expression::FunctionCall(_, callee, cargs) = base.as_ref() {
+                        if is_address_cast(callee) {
+                            if let Some(Expression::Variable(inner)) = cargs.first() {
+                                if inner.name == "this" {
+                                    self.uses.balance = true;
+                                    return ("self_balance()".to_string(), ValTy::Num);
+                                }
+                            }
+                        }
+                    }
                 }
                 (self.err(&format!("member access .{}", member.name)), ValTy::Num)
             }
@@ -217,8 +263,48 @@ impl<'a> SealCtx<'a> {
                             return self.expr_ty(a);
                         }
                     }
+                    // intN(x) / uintN(x) casts: pass value, adjust kind.
+                    if id.name.starts_with("int") {
+                        if let Some(a) = args.first() {
+                            let (s, _) = self.expr_ty(a);
+                            return (format!("({s} as i128)"), ValTy::SNum);
+                        }
+                    }
+                    if id.name.starts_with("uint") {
+                        if let Some(a) = args.first() {
+                            let (s, _) = self.expr_ty(a);
+                            return (format!("({s} as u128)"), ValTy::Num);
+                        }
+                    }
                 }
                 (self.err("function call in value position"), ValTy::Num)
+            }
+
+            // Bitwise binary ops.
+            Expression::BitwiseAnd(_, l, r) => (self.bitop(l, r, "&"), ValTy::Num),
+            Expression::BitwiseOr(_, l, r) => (self.bitop(l, r, "|"), ValTy::Num),
+            Expression::BitwiseXor(_, l, r) => (self.bitop(l, r, "^"), ValTy::Num),
+            Expression::ShiftLeft(_, l, r) => (self.shift(l, r, "wrapping_shl"), ValTy::Num),
+            Expression::ShiftRight(_, l, r) => (self.shift(l, r, "wrapping_shr"), ValTy::Num),
+            Expression::BitwiseNot(_, inner) => {
+                let (s, t) = self.expr_ty(inner);
+                (format!("(!({s}))"), if t.is_numeric() { t } else { ValTy::Num })
+            }
+
+            // Unary minus on a numeric literal/expr -> signed.
+            Expression::Negate(_, inner) => {
+                let (s, _) = self.expr_ty(inner);
+                (format!("(-({s} as i128))"), ValTy::SNum)
+            }
+
+            // Pre/post increment & decrement used in value position (e.g. i++).
+            Expression::PreIncrement(_, inner)
+            | Expression::PostIncrement(_, inner)
+            | Expression::PreDecrement(_, inner)
+            | Expression::PostDecrement(_, inner) => {
+                // Value-position inc/dec is uncommon; handle as the bare value
+                // (the mutation is realized by the statement-level handler).
+                self.expr_ty(inner)
             }
 
             _ => (self.err("expression"), ValTy::Num),
@@ -230,46 +316,75 @@ impl<'a> SealCtx<'a> {
         self.expr_ty(e).0
     }
 
-    fn arith(&mut self, l: &Expression, r: &Expression, op: &str) -> String {
-        let l = self.expr(l);
-        let r = self.expr(r);
-        format!("({l}).{op}({r}).unwrap_or_else(|| revert())")
+    /// Render a checked arithmetic op, propagating signedness. If either operand
+    /// is signed, both are coerced to `i128` and the result is signed.
+    fn arith(&mut self, l: &Expression, r: &Expression, op: &str) -> (String, ValTy) {
+        let (ls, lt) = self.expr_ty(l);
+        let (rs, rt) = self.expr_ty(r);
+        let signed = lt == ValTy::SNum || rt == ValTy::SNum;
+        if signed {
+            let lc = coerce_num(&ls, lt, ValTy::SNum);
+            let rc = coerce_num(&rs, rt, ValTy::SNum);
+            (
+                format!("({lc}).{op}({rc}).unwrap_or_else(|| revert())"),
+                ValTy::SNum,
+            )
+        } else {
+            (
+                format!("({ls}).{op}({rs}).unwrap_or_else(|| revert())"),
+                ValTy::Num,
+            )
+        }
     }
 
     fn cmp(&mut self, l: &Expression, r: &Expression, op: &str) -> String {
-        let (l, _) = self.expr_ty(l);
-        let (r, _) = self.expr_ty(r);
-        format!("({l} {op} {r})")
+        let (ls, lt) = self.expr_ty(l);
+        let (rs, rt) = self.expr_ty(r);
+        // Coerce to a common numeric type for signed compares.
+        if lt == ValTy::SNum || rt == ValTy::SNum {
+            let lc = coerce_num(&ls, lt, ValTy::SNum);
+            let rc = coerce_num(&rs, rt, ValTy::SNum);
+            return format!("({lc} {op} {rc})");
+        }
+        format!("({ls} {op} {rs})")
+    }
+
+    /// Bitwise `& | ^` on numeric operands.
+    fn bitop(&mut self, l: &Expression, r: &Expression, op: &str) -> String {
+        let (ls, _) = self.expr_ty(l);
+        let (rs, _) = self.expr_ty(r);
+        format!("(({ls}) {op} ({rs}))")
+    }
+
+    /// Bitwise shift `<< >>` (wrapping on the shift amount as u32).
+    fn shift(&mut self, l: &Expression, r: &Expression, method: &str) -> String {
+        let (ls, _) = self.expr_ty(l);
+        let (rs, _) = self.expr_ty(r);
+        format!("(({ls}).{method}(({rs}) as u32))")
     }
 
     /// If `e` is a mapping access `m[k]` or `m[a][b]` rooted at a storage
-    /// mapping, return `(slot_index, value_kind, key_exprs)`.
-    fn as_map_access(&mut self, e: &Expression) -> Option<(u8, ValTy, Vec<String>)> {
+    /// mapping, return `(slot_index, value_kind, [(key_expr, key_kind)...])`.
+    fn as_map_access(&mut self, e: &Expression) -> Option<(u8, ValTy, Vec<(String, ValTy)>)> {
         if let Expression::ArraySubscript(_, base, Some(index)) = e {
-            let key = self.expr(index);
             match base.as_ref() {
                 Expression::Variable(id) => {
-                    let slot = self.slot_of(&id.name)?;
-                    match slot.kind {
-                        SlotKind::Map { val } => Some((slot.index, val, vec![key])),
-                        _ => None,
-                    }
+                    let (idx, key_kind, val) = match self.slot_of(&id.name)?.kind {
+                        SlotKind::Map { key, val } => (self.slot_of(&id.name)?.index, key, val),
+                        _ => return None,
+                    };
+                    let key = self.encode_key(index, key_kind);
+                    Some((idx, val, vec![(key, key_kind)]))
                 }
-                Expression::ArraySubscript(..) => {
+                Expression::ArraySubscript(_, inner_base, Some(inner_idx)) => {
                     // nested: base is m[a], so this is m[a][b].
-                    if let Expression::ArraySubscript(_, inner_base, Some(inner_idx)) =
-                        base.as_ref()
-                    {
-                        if let Expression::Variable(id) = inner_base.as_ref() {
-                            let slot = self.slot_of(&id.name)?;
-                            let info = match slot.kind {
-                                SlotKind::Map2 { val } => Some((slot.index, val)),
-                                _ => None,
-                            };
-                            if let Some((idx, val)) = info {
-                                let a = self.expr(inner_idx);
-                                return Some((idx, val, vec![a, key]));
-                            }
+                    if let Expression::Variable(id) = inner_base.as_ref() {
+                        let slot = self.slot_of(&id.name)?;
+                        if let SlotKind::Map2 { key1, key2, val } = slot.kind {
+                            let idx = slot.index;
+                            let a = self.encode_key(inner_idx, key1);
+                            let b = self.encode_key(index, key2);
+                            return Some((idx, val, vec![(a, key1), (b, key2)]));
                         }
                     }
                     None
@@ -281,17 +396,32 @@ impl<'a> SealCtx<'a> {
         }
     }
 
-    /// Emit the call that computes a mapping storage key for the given slot and
-    /// key expressions. Key bytes are the SCALE/raw encoding of each key: a
-    /// u128 key is 16 LE bytes, an address key is 32 raw bytes. To keep the
-    /// generated helper simple we restrict map keys to `address` (32 bytes),
-    /// which covers all spec fixtures; numeric keys fall back to 16-byte LE.
-    fn map_key_call(&mut self, slot: u8, keys: &[String]) -> String {
-        self.uses.blake2 = true;
-        match keys.len() {
-            1 => format!("map_key1({slot}, &{})", keys[0]),
-            _ => format!("map_key2({slot}, &{}, &{})", keys[0], keys[1]),
+    /// Render a key expression coerced to the slot's declared key kind (so a
+    /// numeric literal indexing a `mapping(uint=>..)` is `u128`, etc).
+    fn encode_key(&mut self, e: &Expression, kind: ValTy) -> String {
+        let (s, t) = self.expr_ty(e);
+        match kind {
+            ValTy::Addr | ValTy::Bool => s,
+            ValTy::Num => coerce_num(&s, t, ValTy::Num),
+            ValTy::SNum => coerce_num(&s, t, ValTy::SNum),
         }
+    }
+
+    /// Emit the call that computes a mapping storage key for the given slot and
+    /// key expressions. Key bytes are the SCALE/raw encoding of each key: an
+    /// address key is 32 raw bytes, a u128/i128 key is 16 LE bytes, a bool key
+    /// is 1 byte. The preimage is `[slot] ++ key_bytes...` hashed with blake2.
+    fn map_key_call(&mut self, slot: u8, keys: &[(String, ValTy)]) -> String {
+        self.uses.blake2 = true;
+        let parts: Vec<String> = keys
+            .iter()
+            .map(|(expr, kind)| match kind {
+                ValTy::Addr => format!("MapKey::Addr(&{expr})"),
+                ValTy::Bool => format!("MapKey::Byte({expr} as u8)"),
+                _ => format!("MapKey::Word(({expr}) as u128)"),
+            })
+            .collect();
+        format!("map_key(&[{}], {slot})", parts.join(", "))
     }
 
     /// Render a statement into Rust source lines.
@@ -301,16 +431,29 @@ impl<'a> SealCtx<'a> {
                 statements.iter().flat_map(|st| self.stmt(st)).collect()
             }
 
-            Statement::Expression(_, e) => match e {
-                Expression::Assign(_, lhs, rhs) => self.assign(lhs, rhs),
-                Expression::FunctionCall(_, callee, args) => self.call_stmt(callee, args),
-                _ => {
-                    let r = self.expr(e);
-                    vec![format!("let _ = {r};")]
-                }
-            },
+            Statement::Expression(_, e) => self.expr_stmt(e),
 
             Statement::Return(_, Some(e)) => {
+                // Multi-return: `return (a, b, ...)` -> SCALE-concat and `ret()`
+                // inline (diverges, so control flow matches Solidity's return).
+                if self.ret_kinds.len() > 1 {
+                    if let Some(items) = list_items(e) {
+                        let kinds = self.ret_kinds.clone();
+                        let mut vals: Vec<(String, ValTy)> = Vec::new();
+                        for (i, item) in items.iter().enumerate() {
+                            let want = kinds.get(i).copied().unwrap_or(ValTy::Num);
+                            let (v, t) = self.expr_ty(item);
+                            let coerced = match want {
+                                ValTy::Num | ValTy::SNum => coerce_num(&v, t, want),
+                                _ => v,
+                            };
+                            vals.push((coerced, want));
+                        }
+                        return emit_tuple_ret(&vals);
+                    }
+                    self.err("multi-return expects a tuple `return (a, b)`");
+                    return vec![];
+                }
                 let (v, t) = self.expr_ty(e);
                 vec![format!("__ret = Some({});", wrap_ret(&v, t))]
             }
@@ -333,6 +476,59 @@ impl<'a> SealCtx<'a> {
                 out
             }
 
+            // `for (init; cond; post) { body }` -> Rust `while` loop.
+            Statement::For(_, init, cond, post, body) => {
+                let mut out = Vec::new();
+                out.push("{".to_string());
+                if let Some(init) = init {
+                    for l in self.stmt(init) {
+                        out.push(format!("    {l}"));
+                    }
+                }
+                let c = match cond {
+                    Some(c) => self.expr(c),
+                    None => "true".to_string(),
+                };
+                out.push(format!("    while {c} {{"));
+                if let Some(body) = body {
+                    for l in self.stmt(body) {
+                        out.push(format!("        {l}"));
+                    }
+                }
+                if let Some(post) = post {
+                    // `post` is an expression (e.g. i++); reuse statement lowering.
+                    for l in self.expr_stmt(post) {
+                        out.push(format!("        {l}"));
+                    }
+                }
+                out.push("    }".to_string());
+                out.push("}".to_string());
+                out
+            }
+
+            Statement::While(_, cond, body) => {
+                let mut out = Vec::new();
+                let c = self.expr(cond);
+                out.push(format!("while {c} {{"));
+                for l in self.stmt(body) {
+                    out.push(format!("    {l}"));
+                }
+                out.push("}".to_string());
+                out
+            }
+
+            Statement::DoWhile(_, body, cond) => {
+                let mut out = Vec::new();
+                out.push("loop {".to_string());
+                for l in self.stmt(body) {
+                    out.push(format!("    {l}"));
+                }
+                let c = self.expr(cond);
+                out.push(format!("    if !({c}) {{ break; }}"));
+                out.push("}".to_string());
+                out
+            }
+
             Statement::Emit(_, e) => self.emit_stmt(e),
 
             Statement::Revert(_, _path, _args) => vec!["revert();".to_string()],
@@ -340,13 +536,15 @@ impl<'a> SealCtx<'a> {
             // Local variable declaration `T name = expr;`.
             Statement::VariableDefinition(_, decl, init) => {
                 let name = decl.name.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+                // Locals are `mut` (loop counters / reassigned vars); the crate
+                // sets `#![allow(unused_mut)]`.
                 if let Some(rhs) = init {
                     let (v, t) = self.expr_ty(rhs);
                     self.locals.insert(name.clone(), t);
-                    vec![format!("let {name} = {v};")]
+                    vec![format!("let mut {name} = {v};")]
                 } else {
                     self.locals.insert(name.clone(), ValTy::Num);
-                    vec![format!("let {name};")]
+                    vec![format!("let mut {name};")]
                 }
             }
 
@@ -354,29 +552,129 @@ impl<'a> SealCtx<'a> {
         }
     }
 
-    /// `lhs = rhs;` — scalar storage write, mapping write, or local.
-    fn assign(&mut self, lhs: &Expression, rhs: &Expression) -> Vec<String> {
-        // Mapping write?
+    /// Lower an expression used in statement position.
+    fn expr_stmt(&mut self, e: &Expression) -> Vec<String> {
+        match e {
+            Expression::Assign(_, lhs, rhs) => self.assign(lhs, rhs),
+            // Compound assignment: a += b, a -= b, ...
+            Expression::AssignAdd(_, lhs, rhs) => self.compound(lhs, rhs, "checked_add"),
+            Expression::AssignSubtract(_, lhs, rhs) => self.compound(lhs, rhs, "checked_sub"),
+            Expression::AssignMultiply(_, lhs, rhs) => self.compound(lhs, rhs, "checked_mul"),
+            Expression::AssignDivide(_, lhs, rhs) => self.compound(lhs, rhs, "checked_div"),
+            Expression::AssignModulo(_, lhs, rhs) => self.compound(lhs, rhs, "checked_rem"),
+            Expression::AssignOr(_, lhs, rhs) => self.compound_bit(lhs, rhs, "|"),
+            Expression::AssignAnd(_, lhs, rhs) => self.compound_bit(lhs, rhs, "&"),
+            Expression::AssignXor(_, lhs, rhs) => self.compound_bit(lhs, rhs, "^"),
+            Expression::AssignShiftLeft(_, lhs, rhs) => self.compound_shift(lhs, rhs, "wrapping_shl"),
+            Expression::AssignShiftRight(_, lhs, rhs) => {
+                self.compound_shift(lhs, rhs, "wrapping_shr")
+            }
+            // Increment / decrement statements: n++, ++n, n--, --n.
+            Expression::PostIncrement(_, inner) | Expression::PreIncrement(_, inner) => {
+                self.incdec(inner, "checked_add")
+            }
+            Expression::PostDecrement(_, inner) | Expression::PreDecrement(_, inner) => {
+                self.incdec(inner, "checked_sub")
+            }
+            Expression::FunctionCall(_, callee, args) => self.call_stmt(callee, args),
+            _ => {
+                let r = self.expr(e);
+                vec![format!("let _ = {r};")]
+            }
+        }
+    }
+
+    /// Compound arithmetic assignment `lhs OP= rhs` (checked).
+    fn compound(&mut self, lhs: &Expression, rhs: &Expression, op: &str) -> Vec<String> {
+        // Read current value, apply checked op, write back. Implemented by
+        // synthesizing `lhs = (lhs).op(rhs)` through the normal read/write paths.
+        let (cur, ct) = self.expr_ty(lhs);
+        let (val, vt) = self.expr_ty(rhs);
+        let signed = ct == ValTy::SNum || vt == ValTy::SNum;
+        let target = if signed { ValTy::SNum } else { ValTy::Num };
+        let lc = coerce_num(&cur, ct, target);
+        let rc = coerce_num(&val, vt, target);
+        let combined = format!("({lc}).{op}({rc}).unwrap_or_else(|| revert())");
+        self.write_back(lhs, &combined, target)
+    }
+
+    /// Compound bitwise assignment `lhs OP= rhs`.
+    fn compound_bit(&mut self, lhs: &Expression, rhs: &Expression, op: &str) -> Vec<String> {
+        let (cur, ct) = self.expr_ty(lhs);
+        let (val, _) = self.expr_ty(rhs);
+        let combined = format!("(({cur}) {op} ({val}))");
+        self.write_back(lhs, &combined, ct)
+    }
+
+    /// Compound shift assignment `lhs <<= rhs` / `lhs >>= rhs`.
+    fn compound_shift(&mut self, lhs: &Expression, rhs: &Expression, method: &str) -> Vec<String> {
+        let (cur, ct) = self.expr_ty(lhs);
+        let (val, _) = self.expr_ty(rhs);
+        let combined = format!("(({cur}).{method}(({val}) as u32))");
+        self.write_back(lhs, &combined, ct)
+    }
+
+    /// `n++` / `n--` as a statement: read, checked +/-1, write back.
+    fn incdec(&mut self, target: &Expression, op: &str) -> Vec<String> {
+        let (cur, ct) = self.expr_ty(target);
+        let one = if ct == ValTy::SNum { "1i128" } else { "1u128" };
+        let combined = format!("({cur}).{op}({one}).unwrap_or_else(|| revert())");
+        self.write_back(target, &combined, ct)
+    }
+
+    /// Write `value` (of kind `vt`) back to an lvalue (storage scalar, mapping
+    /// element, or local).
+    fn write_back(&mut self, lhs: &Expression, value: &str, vt: ValTy) -> Vec<String> {
         if let Expression::ArraySubscript(..) = lhs {
             if let Some((slot_idx, val, keys)) = self.as_map_access(lhs) {
-                let (value, _) = self.expr_ty(rhs);
                 let key_expr = self.map_key_call(slot_idx, &keys);
+                let coerced = coerce_num(value, vt, val);
                 let setter = match val {
-                    ValTy::Bool => format!("map_set_bool({key_expr}, {value});"),
-                    _ => format!("map_set_u128({key_expr}, {value});"),
+                    ValTy::Bool => format!("map_set_bool({key_expr}, {coerced});"),
+                    _ => format!("map_set_u128({key_expr}, ({coerced}) as u128);"),
                 };
                 return vec![setter];
             }
         }
+        if let Expression::Variable(id) = lhs {
+            if let Some(slot) = self.slot_of(&id.name) {
+                if let SlotKind::Scalar(svt) = slot.kind {
+                    let idx = slot.index;
+                    let coerced = coerce_num(value, vt, svt);
+                    let store = match svt {
+                        ValTy::SNum => format!("store_slot_{idx}(({coerced}) as u128);"),
+                        _ => format!("store_slot_{idx}({coerced});"),
+                    };
+                    return vec![store];
+                }
+            }
+            return vec![format!("{} = {value};", id.name)];
+        }
+        vec![format!("// {}", self.err("compound assignment target"))]
+    }
+
+    /// `lhs = rhs;` — scalar storage write, mapping write, or local.
+    fn assign(&mut self, lhs: &Expression, rhs: &Expression) -> Vec<String> {
         let (value, vt) = self.expr_ty(rhs);
+        // Mapping write?
+        if let Expression::ArraySubscript(..) = lhs {
+            if self.as_map_access(lhs).is_some() {
+                return self.write_back(lhs, &value, vt);
+            }
+        }
         if let Expression::Variable(id) = lhs {
             if let Some(slot) = self.slot_of(&id.name) {
                 if let SlotKind::Scalar(_) = slot.kind {
-                    return vec![format!("store_slot_{}({value});", slot.index)];
+                    return self.write_back(lhs, &value, vt);
                 }
             }
+            // Reassign an already-declared local with plain `=` (so the update
+            // is visible after a loop); declare a fresh `let mut` otherwise.
+            if self.locals.contains_key(&id.name) {
+                return vec![format!("{} = {value};", id.name)];
+            }
             self.locals.insert(id.name.clone(), vt);
-            return vec![format!("let {} = {value};", id.name)];
+            return vec![format!("let mut {} = {value};", id.name)];
         }
         vec![format!("// {}", self.err("assignment target"))]
     }
@@ -478,7 +776,7 @@ impl<'a> SealCtx<'a> {
                     .map(|(_, t)| match t {
                         ValTy::Addr => 32,
                         ValTy::Bool => 1,
-                        ValTy::Num => 16,
+                        ValTy::Num | ValTy::SNum => 16,
                     })
                     .sum();
                 lines.push(format!(
@@ -499,7 +797,7 @@ impl<'a> SealCtx<'a> {
                             lines.push(format!("__data[{doff}] = {var} as u8;"));
                             doff += 1;
                         }
-                        ValTy::Num => {
+                        ValTy::Num | ValTy::SNum => {
                             lines.push(format!(
                                 "{{ let __le = ({var} as u128).to_le_bytes(); let mut __i = 0usize; while __i < 16 {{ __data[{doff} + __i] = __le[__i]; __i += 1; }} }}"
                             ));
@@ -521,6 +819,92 @@ impl<'a> SealCtx<'a> {
 /// Wrap a return expression so all returns are encoded uniformly as bytes.
 fn wrap_ret(v: &str, _t: ValTy) -> String {
     v.to_string()
+}
+
+/// Coerce a rendered numeric expression of kind `from` to kind `to`.
+fn coerce_num(src: &str, from: ValTy, to: ValTy) -> String {
+    if from == to {
+        return src.to_string();
+    }
+    match to {
+        ValTy::SNum => format!("({src} as i128)"),
+        ValTy::Num => format!("({src} as u128)"),
+        _ => src.to_string(),
+    }
+}
+
+/// If `e` is a tuple/list `(a, b, ...)`, return its element expressions.
+fn list_items(e: &Expression) -> Option<Vec<Expression>> {
+    match e {
+        Expression::List(_, params) => {
+            let items: Vec<Expression> = params
+                .iter()
+                .filter_map(|(_, p)| p.as_ref().map(|p| p.ty.clone()))
+                .collect();
+            if items.is_empty() {
+                None
+            } else {
+                Some(items)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Emit an inline SCALE-concat `ret()` for a `return (a, b, ...)` tuple. Each
+/// rendered value `vals[i]` is appended LE (numeric 16 bytes, bool 1, addr 32).
+/// `ret()` diverges, so this faithfully exits the function.
+fn emit_tuple_ret(vals: &[(String, ValTy)]) -> Vec<String> {
+    let total: usize = vals.iter().map(|(_, t)| val_len(*t)).sum();
+    let mut lines = Vec::new();
+    lines.push("{".to_string());
+    // Bind each value first so side-effecting expressions evaluate once.
+    for (i, (v, t)) in vals.iter().enumerate() {
+        match t {
+            ValTy::Addr => lines.push(format!("let __r{i}: [u8; 32] = {v};")),
+            ValTy::Bool => lines.push(format!("let __r{i}: bool = {v};")),
+            ValTy::SNum => lines.push(format!("let __r{i}: i128 = {v};")),
+            ValTy::Num => lines.push(format!("let __r{i}: u128 = {v};")),
+        }
+    }
+    lines.push(format!(
+        "let mut __mout = MaybeUninit::<[u8; {}]>::uninit();",
+        total.max(1)
+    ));
+    lines.push("let __mo = unsafe { &mut *__mout.as_mut_ptr() };".to_string());
+    let mut off = 0usize;
+    for (i, (_, t)) in vals.iter().enumerate() {
+        match t {
+            ValTy::Addr => {
+                lines.push(format!(
+                    "{{ let mut __j = 0usize; while __j < 32 {{ __mo[{off} + __j] = __r{i}[__j]; __j += 1; }} }}"
+                ));
+                off += 32;
+            }
+            ValTy::Bool => {
+                lines.push(format!("__mo[{off}] = __r{i} as u8;"));
+                off += 1;
+            }
+            ValTy::Num | ValTy::SNum => {
+                lines.push(format!(
+                    "{{ let __le = (__r{i} as u128).to_le_bytes(); let mut __j = 0usize; while __j < 16 {{ __mo[{off} + __j] = __le[__j]; __j += 1; }} }}"
+                ));
+                off += 16;
+            }
+        }
+    }
+    lines.push(format!("ret(&__mo[..{off}]);"));
+    lines.push("}".to_string());
+    lines
+}
+
+/// Is `e` an `address(...)` cast callee?
+fn is_address_cast(e: &Expression) -> bool {
+    match e {
+        Expression::Variable(id) => id.name == "address",
+        Expression::Type(_, PtType::Address) | Expression::Type(_, PtType::AddressPayable) => true,
+        _ => false,
+    }
 }
 
 /// Canonical event signature string `Name(t1,t2,...)`.
@@ -557,14 +941,30 @@ fn snake(name: &str) -> String {
             out.push(ch);
         }
     }
+    // Avoid Rust reserved keywords as crate names (e.g. `pub`).
+    if is_rust_keyword(&out) {
+        out.push_str("_contract");
+    }
     out
+}
+
+/// Whether `s` is a Rust reserved keyword that cannot be a crate/package name.
+fn is_rust_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "as" | "break" | "const" | "continue" | "crate" | "dyn" | "else" | "enum" | "extern"
+            | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match" | "mod"
+            | "move" | "mut" | "pub" | "ref" | "return" | "self" | "static" | "struct" | "super"
+            | "trait" | "true" | "type" | "unsafe" | "use" | "where" | "while" | "async"
+            | "await" | "abstract"
+    )
 }
 
 /// Number of SCALE/storage bytes for a scalar value kind.
 fn val_len(t: ValTy) -> usize {
     match t {
         ValTy::Bool => 1,
-        ValTy::Num => 16,
+        ValTy::Num | ValTy::SNum => 16,
         ValTy::Addr => 32,
     }
 }
@@ -579,6 +979,7 @@ fn meta_ty(t: &Type) -> &'static str {
     match t {
         Type::Bool => "bool",
         Type::AccountId => "address",
+        Type::I128 => "i128",
         _ => "u128",
     }
 }
@@ -663,6 +1064,7 @@ pub fn emit_seal(
         let kind = match &f.ty {
             Type::Bool => SlotKind::Scalar(ValTy::Bool),
             Type::U128 => SlotKind::Scalar(ValTy::Num),
+            Type::I128 => SlotKind::Scalar(ValTy::SNum),
             Type::AccountId => SlotKind::Scalar(ValTy::Addr),
             Type::U256 => {
                 return Err(format!(
@@ -671,20 +1073,25 @@ pub fn emit_seal(
                 ))
             }
             Type::Mapping(k, v) => match (k.as_ref(), v.as_ref()) {
-                // mapping(address => scalar)
-                (Type::AccountId, inner) if is_scalar(inner) => {
-                    SlotKind::Map { val: ValTy::from_type(inner) }
-                }
-                // mapping(address => mapping(address => scalar))
-                (Type::AccountId, Type::Mapping(k2, v2))
-                    if matches!(k2.as_ref(), Type::AccountId) && is_scalar(v2) =>
+                // mapping(scalar-key => scalar)
+                (kt, inner) if is_scalar_key(kt) && is_scalar(inner) => SlotKind::Map {
+                    key: ValTy::from_type(kt),
+                    val: ValTy::from_type(inner),
+                },
+                // mapping(scalar-key => mapping(scalar-key => scalar))
+                (kt, Type::Mapping(k2, v2))
+                    if is_scalar_key(kt) && is_scalar_key(k2) && is_scalar(v2) =>
                 {
-                    SlotKind::Map2 { val: ValTy::from_type(v2) }
+                    SlotKind::Map2 {
+                        key1: ValTy::from_type(kt),
+                        key2: ValTy::from_type(k2),
+                        val: ValTy::from_type(v2),
+                    }
                 }
                 _ => {
                     return Err(format!(
-                        "field `{}`: only mapping(address=>scalar) and \
-                         mapping(address=>mapping(address=>scalar)) supported",
+                        "field `{}`: only mapping(scalar=>scalar) and \
+                         mapping(scalar=>mapping(scalar=>scalar)) supported",
                         f.name
                     ))
                 }
@@ -735,17 +1142,36 @@ pub fn emit_seal(
         let fdef = find_function(def, false, &msg.name);
         let mut ctx = SealCtx::new(&slots, &c.events);
         register_params(&mut ctx, &msg.params);
+        ctx.ret_kinds = msg.returns.iter().map(ValTy::from_type).collect();
 
         let mut body_lines: Vec<String> = decode_params_prelude(&msg.params, true);
 
-        let has_ret = msg.returns.is_some();
-        if has_ret {
-            let rt = ret_rust_ty(msg.returns.as_ref().unwrap());
+        // Single-return functions use an `Option<T> __ret` accumulator set by
+        // `Statement::Return`. Multi-return uses per-element `__mretN` vars.
+        let single_ret = msg.returns.len() == 1;
+        if single_ret {
+            let rt = ret_rust_ty(&msg.returns[0]);
             body_lines.push(format!("let mut __ret: Option<{rt}> = None;"));
         }
 
-        // Inline modifier guards (e.g. onlyOwner) at function entry.
-        if let Some(fdef) = fdef {
+        // Auto-getter synthesis: a public storage var with no explicit function
+        // body. Emit `return <slot>;`.
+        let is_auto_getter = fdef.is_none()
+            && msg.params.is_empty()
+            && single_ret
+            && slots.iter().any(|s| s.name == msg.name && matches!(s.kind, SlotKind::Scalar(_)));
+
+        if is_auto_getter {
+            let slot = slots.iter().find(|s| s.name == msg.name).unwrap();
+            if let SlotKind::Scalar(vt) = slot.kind {
+                let read = match vt {
+                    ValTy::SNum => format!("(load_slot_{}() as i128)", slot.index),
+                    _ => format!("load_slot_{}()", slot.index),
+                };
+                body_lines.push(format!("__ret = Some({read});"));
+            }
+        } else if let Some(fdef) = fdef {
+            // Inline modifier guards (e.g. onlyOwner) at function entry.
             for mname in function_modifiers(fdef) {
                 if let Some(guards) = modifiers.get(&mname) {
                     for g in guards {
@@ -760,13 +1186,16 @@ pub fn emit_seal(
                     body_lines.push(l);
                 }
             }
+        } else if !msg.returns.is_empty() {
+            // No body, not an auto-getter, but declares a return: cannot emit.
+            ctx.err(&format!("function `{}` has no translatable body", msg.name));
         }
         merge_uses(&mut uses, ctx.uses);
         all_errors.extend(ctx.errors);
 
         // Return emission.
-        if has_ret {
-            match ValTy::from_type(msg.returns.as_ref().unwrap()) {
+        if single_ret {
+            match ValTy::from_type(&msg.returns[0]) {
                 ValTy::Bool => {
                     body_lines.push("let __v = __ret.unwrap_or(false);".to_string());
                     body_lines.push("let __out = [__v as u8];".to_string());
@@ -776,12 +1205,22 @@ pub fn emit_seal(
                     body_lines.push("let __v = __ret.unwrap_or([0u8; 32]);".to_string());
                     body_lines.push("ret(&__v);".to_string());
                 }
+                ValTy::SNum => {
+                    body_lines.push("let __v = __ret.unwrap_or(0i128);".to_string());
+                    body_lines.push("let __out = (__v as u128).to_le_bytes();".to_string());
+                    body_lines.push("ret(&__out);".to_string());
+                }
                 ValTy::Num => {
                     body_lines.push("let __v = __ret.unwrap_or(0u128);".to_string());
                     body_lines.push("let __out = __v.to_le_bytes();".to_string());
                     body_lines.push("ret(&__out);".to_string());
                 }
             }
+        } else if msg.returns.len() > 1 {
+            // Multi-return values are emitted inline at each `return (a, b)` via
+            // a diverging `ret()`. If control reaches here the body had no
+            // return on some path; revert (mirrors a missing-return contract).
+            body_lines.push("revert();".to_string());
         } else {
             body_lines.push("ret(&[]);".to_string());
         }
@@ -800,9 +1239,16 @@ pub fn emit_seal(
             .iter()
             .map(|p| format!("\"{}\"", meta_ty(&p.ty)))
             .collect();
-        let ret_meta = match &msg.returns {
-            Some(t) => format!("\"{}\"", meta_ty(t)),
-            None => "null".to_string(),
+        // `ret` is a single type string for 0/1 returns (back-compat), or a
+        // JSON list of type strings for multi-return.
+        let ret_meta = match msg.returns.len() {
+            0 => "null".to_string(),
+            1 => format!("\"{}\"", meta_ty(&msg.returns[0])),
+            _ => {
+                let parts: Vec<String> =
+                    msg.returns.iter().map(|t| format!("\"{}\"", meta_ty(t))).collect();
+                format!("[{}]", parts.join(", "))
+            }
         };
         let mutates = !matches!(msg.mutability, Mutability::View);
         let payable = matches!(msg.mutability, Mutability::Payable);
@@ -814,6 +1260,28 @@ pub fn emit_seal(
             ret_meta,
             mutates,
             payable
+        ));
+    }
+
+    // ----- FAIL-LOUD: any unsupported construct collected during lowering is a
+    // hard error. We never emit a silently mis-translated contract.
+    if !all_errors.is_empty() {
+        let mut dedup: Vec<String> = Vec::new();
+        for e in &all_errors {
+            if !dedup.contains(e) {
+                dedup.push(e.clone());
+            }
+        }
+        let listed = dedup
+            .iter()
+            .map(|e| format!("  - {e}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "{} unsupported construct(s) in contract `{}`:\n{}",
+            dedup.len(),
+            c.name,
+            listed
         ));
     }
 
@@ -882,13 +1350,19 @@ pub fn emit_seal(
 }
 
 fn is_scalar(t: &Type) -> bool {
-    matches!(t, Type::Bool | Type::U128 | Type::AccountId)
+    matches!(t, Type::Bool | Type::U128 | Type::I128 | Type::AccountId)
+}
+
+/// Types usable as a mapping key (address, numeric, bool).
+fn is_scalar_key(t: &Type) -> bool {
+    matches!(t, Type::AccountId | Type::U128 | Type::I128 | Type::Bool)
 }
 
 fn ret_rust_ty(t: &Type) -> &'static str {
     match ValTy::from_type(t) {
         ValTy::Bool => "bool",
         ValTy::Addr => "[u8; 32]",
+        ValTy::SNum => "i128",
         ValTy::Num => "u128",
     }
 }
@@ -905,6 +1379,9 @@ fn merge_uses(acc: &mut Uses, u: Uses) {
     acc.blake2 |= u.blake2;
     acc.deposit_event |= u.deposit_event;
     acc.transfer |= u.transfer;
+    acc.now |= u.now;
+    acc.block_number |= u.block_number;
+    acc.balance |= u.balance;
 }
 
 /// Prelude that decodes parameters from the input buffer.
@@ -929,6 +1406,16 @@ fn decode_params_prelude(params: &[crate::ir::Param], after_selector: bool) -> V
             ValTy::Num => {
                 lines.push(format!(
                     "let mut __b_{n} = [0u8; 16]; __b_{n}.copy_from_slice(&input[{a}..{b}]); let {n} = u128::from_le_bytes(__b_{n});",
+                    n = p.name,
+                    a = off,
+                    b = off + 16
+                ));
+                off += 16;
+            }
+            ValTy::SNum => {
+                // Signed param: decode 16-byte LE two's-complement -> i128.
+                lines.push(format!(
+                    "let mut __b_{n} = [0u8; 16]; __b_{n}.copy_from_slice(&input[{a}..{b}]); let {n} = i128::from_le_bytes(__b_{n});",
                     n = p.name,
                     a = off,
                     b = off + 16
@@ -966,7 +1453,10 @@ fn render_slot_helpers(slots: &[Slot]) -> String {
                         "fn load_slot_{s}() -> [u8; 32] {{ let mut buf = [0u8; 32]; let mut len: u32 = 32; let rc = unsafe {{ seal_get_storage(KEY_{s}.as_ptr(), buf.as_mut_ptr(), &mut len as *mut u32) }}; let _ = rc; buf }}\n"
                     ));
                 }
-                ValTy::Num => {
+                // Both unsigned and signed numerics are stored as 16-byte LE
+                // u128 bit patterns (two's-complement for signed). Signed reads
+                // cast `load_slot_N() as i128` at the use site.
+                ValTy::Num | ValTy::SNum => {
                     out.push_str(&format!(
                         "fn store_slot_{s}(v: u128) {{ let b = v.to_le_bytes(); unsafe {{ seal_set_storage(KEY_{s}.as_ptr(), b.as_ptr(), 16); }} }}\n"
                     ));
@@ -1026,6 +1516,15 @@ fn render_lib_rs(
             "    fn seal_transfer(acct: *const u8, acct_len: u32, val: *const u8, val_len: u32) -> u32;\n",
         );
     }
+    if uses.now {
+        out.push_str("    fn seal_now(out: *mut u8, out_len: *mut u32);\n");
+    }
+    if uses.block_number {
+        out.push_str("    fn seal_block_number(out: *mut u8, out_len: *mut u32);\n");
+    }
+    if uses.balance {
+        out.push_str("    fn seal_balance(out: *mut u8, out_len: *mut u32);\n");
+    }
     out.push_str("}\n\n");
 
     // Runtime helpers.
@@ -1040,6 +1539,16 @@ fn render_lib_rs(
     }
     if uses.transfer {
         out.push_str("fn do_transfer(acct: &[u8; 32], amount: u128) { let v = amount.to_le_bytes(); let rc = unsafe { seal_transfer(acct.as_ptr(), 32, v.as_ptr(), 16) }; if rc != 0 { revert(); } }\n");
+    }
+    if uses.now {
+        // block.timestamp: seal_now returns the block time in milliseconds (LE).
+        out.push_str("fn block_timestamp() -> u128 { let mut buf = [0u8; 16]; let mut len: u32 = 16; unsafe { seal_now(buf.as_mut_ptr(), &mut len as *mut u32); } u128::from_le_bytes(buf) }\n");
+    }
+    if uses.block_number {
+        out.push_str("fn block_number() -> u128 { let mut buf = [0u8; 16]; let mut len: u32 = 16; unsafe { seal_block_number(buf.as_mut_ptr(), &mut len as *mut u32); } u128::from_le_bytes(buf) }\n");
+    }
+    if uses.balance {
+        out.push_str("fn self_balance() -> u128 { let mut buf = [0u8; 16]; let mut len: u32 = 16; unsafe { seal_balance(buf.as_mut_ptr(), &mut len as *mut u32); } u128::from_le_bytes(buf) }\n");
     }
     out.push('\n');
 
@@ -1095,34 +1604,38 @@ fn render_lib_rs(
 
 /// Mapping storage helpers: blake2-256 keys + typed get/set.
 ///
-/// `map_key1(slot, key32)` = blake2_256( [slot] ++ key ) ; key is a 32-byte
-/// AccountId. `map_key2` chains two keys.
-const MAP_HELPERS: &str = r#"fn map_key1(slot: u8, k: &[u8; 32]) -> [u8; 32] {
-    // `pre` is left uninitialized (MaybeUninit) to avoid a `memory.fill`; every
-    // byte is written before the hash reads it.
-    let mut pre = MaybeUninit::<[u8; 33]>::uninit();
-    let pp = pre.as_mut_ptr() as *mut u8;
-    unsafe {
-        *pp = slot;
-        let mut i = 0usize;
-        while i < 32 { *pp.add(1 + i) = k[i]; i += 1; }
-    }
-    let mut out = [0u8; 32];
-    unsafe { seal_hash_blake2_256(pp as *const u8, 33, out.as_mut_ptr()); }
-    out
-}
-fn map_key2(slot: u8, a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+/// `map_key(&[MapKey], slot)` = blake2_256( [slot] ++ each key's bytes ).
+/// Keys may be an address (32 raw bytes), a 16-byte LE u128/i128 word, or a
+/// single byte (bool). The preimage is built into a 65-byte `MaybeUninit`
+/// buffer (max: slot + 2 * 32) byte-by-byte to avoid `memory.fill`/`memory.copy`.
+const MAP_HELPERS: &str = r#"enum MapKey<'a> { Addr(&'a [u8; 32]), Word(u128), Byte(u8) }
+fn map_key(keys: &[MapKey], slot: u8) -> [u8; 32] {
     let mut pre = MaybeUninit::<[u8; 65]>::uninit();
     let pp = pre.as_mut_ptr() as *mut u8;
+    let mut n = 0usize;
     unsafe {
-        *pp = slot;
-        let mut i = 0usize;
-        while i < 32 { *pp.add(1 + i) = a[i]; i += 1; }
-        let mut j = 0usize;
-        while j < 32 { *pp.add(33 + j) = b[j]; j += 1; }
+        *pp = slot; n = 1;
+        let mut ki = 0usize;
+        while ki < keys.len() {
+            match &keys[ki] {
+                MapKey::Addr(a) => {
+                    let mut i = 0usize;
+                    while i < 32 { *pp.add(n + i) = a[i]; i += 1; }
+                    n += 32;
+                }
+                MapKey::Word(w) => {
+                    let le = w.to_le_bytes();
+                    let mut i = 0usize;
+                    while i < 16 { *pp.add(n + i) = le[i]; i += 1; }
+                    n += 16;
+                }
+                MapKey::Byte(b) => { *pp.add(n) = *b; n += 1; }
+            }
+            ki += 1;
+        }
     }
     let mut out = [0u8; 32];
-    unsafe { seal_hash_blake2_256(pp as *const u8, 65, out.as_mut_ptr()); }
+    unsafe { seal_hash_blake2_256(pp as *const u8, n as u32, out.as_mut_ptr()); }
     out
 }
 fn map_get_u128(key: [u8; 32]) -> u128 {
@@ -1244,7 +1757,8 @@ mod tests {
             }
         "#;
         let art = translate_seal(src).expect("translate");
-        assert!(art.lib_rs.contains("map_key1"));
+        assert!(art.lib_rs.contains("map_key("));
+        assert!(art.lib_rs.contains("MapKey::Addr"));
         assert!(art.lib_rs.contains("seal_hash_blake2_256"));
         assert!(art.lib_rs.contains("map_get_u128"));
         // address param decoded as 32 bytes at offset 4.
@@ -1263,7 +1777,9 @@ mod tests {
             }
         "#;
         let art = translate_seal(src).expect("translate");
-        assert!(art.lib_rs.contains("map_key2"));
+        // nested mapping access builds a 2-key blake2 preimage.
+        assert!(art.lib_rs.contains("MapKey::Addr"));
+        assert!(art.lib_rs.matches("MapKey::Addr").count() >= 2);
     }
 
     #[test]
@@ -1350,5 +1866,181 @@ mod tests {
         assert_eq!(snake("Flipper"), "flipper");
         assert_eq!(snake("ERC20"), "erc20");
         assert_eq!(snake("Ownable"), "ownable");
+    }
+
+    #[test]
+    fn reserved_keyword_crate_name_suffixed() {
+        assert_eq!(snake("Pub"), "pub_contract");
+    }
+
+    // ---- Round 2, Wave A features ----
+
+    #[test]
+    fn fail_loud_on_unsupported_construct() {
+        // An unsupported member access must surface as a hard error, not a
+        // silently mis-translated contract.
+        let src = r#"
+            contract Bad {
+                function f() public view returns (uint256) { return block.coinbase.balance; }
+            }
+        "#;
+        let err = translate_seal(src).unwrap_err();
+        assert!(err.contains("unsupported"), "got: {err}");
+        assert!(err.contains("member access"), "got: {err}");
+    }
+
+    #[test]
+    fn signed_int_uses_i128_and_twos_complement_storage() {
+        let src = r#"
+            contract Signed {
+                int256 x;
+                constructor(int256 v) { x = v; }
+                function dec() public { x = x - 1; }
+                function add(int256 d) public { x = x + d; }
+                function get() public view returns (int256) { return x; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("i128::from_le_bytes"));
+        assert!(art.lib_rs.contains("load_slot_0() as i128"));
+        assert!(art.lib_rs.contains("checked_sub"));
+        assert!(art.metadata_json.contains("\"ret\": \"i128\""));
+        assert!(art.metadata_json.contains("\"args\": [\"i128\"]"));
+    }
+
+    #[test]
+    fn public_var_synthesizes_getter() {
+        let src = r#"
+            contract Pub {
+                uint256 public count;
+                constructor(uint256 c) { count = c; }
+                function bump() public { count = count + 1; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.metadata_json.contains("\"name\": \"count\""));
+        // getter reads the slot directly.
+        assert!(art.lib_rs.contains("__ret = Some(load_slot_0());"));
+    }
+
+    #[test]
+    fn multi_return_encodes_tuple_and_lists_ret() {
+        let src = r#"
+            contract MinMax {
+                function minmax(uint a, uint b) public pure returns (uint, uint) {
+                    if (a < b) { return (a, b); }
+                    return (b, a);
+                }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.metadata_json.contains("\"ret\": [\"u128\", \"u128\"]"));
+        // two LE words written into the output buffer, then a sliced ret().
+        assert!(art.lib_rs.contains("ret(&__mo[..32]);"));
+    }
+
+    #[test]
+    fn for_loop_lowers_to_while() {
+        let src = r#"
+            contract Sum {
+                function sumTo(uint n) public pure returns (uint) {
+                    uint s = 0;
+                    for (uint i = 0; i < n; i++) { s = s + i; }
+                    return s;
+                }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("while (i < n)"));
+        // loop counter mutated via plain assignment (visible after the loop).
+        assert!(art.lib_rs.contains("i = (i).checked_add(1u128)"));
+        assert!(art.lib_rs.contains("s = (s).checked_add(i)"));
+    }
+
+    #[test]
+    fn compound_and_incdec() {
+        let src = r#"
+            contract Inc {
+                uint256 n;
+                function bump() public { n++; }
+                function addmul(uint a) public { n += a; }
+                function get() public view returns (uint256) { return n; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("store_slot_0((load_slot_0()).checked_add(1u128)"));
+        assert!(art.lib_rs.contains("store_slot_0((load_slot_0()).checked_add(a)"));
+    }
+
+    #[test]
+    fn bitwise_ops() {
+        let src = r#"
+            contract Bits {
+                function mask(uint x) public pure returns (uint) { return x & 0xff; }
+                function shl(uint x) public pure returns (uint) { return x << 2; }
+                function inv(uint x) public pure returns (uint) { return ~x; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("(x) & (0xffu128)"));
+        assert!(art.lib_rs.contains("(x).wrapping_shl((2u128) as u32)"));
+        assert!(art.lib_rs.contains("(!(x))"));
+    }
+
+    #[test]
+    fn block_context_host_fns() {
+        let src = r#"
+            contract Timed {
+                uint256 start;
+                constructor() { start = block.timestamp; }
+                function elapsed() public view returns (uint256) { return block.timestamp - start; }
+                function afterStart() public view returns (bool) { return block.timestamp >= start; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("fn seal_now"));
+        assert!(art.lib_rs.contains("fn block_timestamp()"));
+        assert!(art.lib_rs.contains("block_timestamp() >= "));
+    }
+
+    #[test]
+    fn balance_and_block_number() {
+        let src = r#"
+            contract B {
+                function bal() public view returns (uint256) { return address(this).balance; }
+                function bn() public view returns (uint256) { return block.number; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("fn seal_balance"));
+        assert!(art.lib_rs.contains("self_balance()"));
+        assert!(art.lib_rs.contains("fn seal_block_number"));
+        assert!(art.lib_rs.contains("block_number()"));
+    }
+
+    #[test]
+    fn scalar_map_keys_use_word_encoding() {
+        let src = r#"
+            contract IdStore {
+                mapping(uint256 => uint256) byId;
+                function set(uint256 id, uint256 v) public { byId[id] = v; }
+                function get(uint256 id) public view returns (uint256) { return byId[id]; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("MapKey::Word((id) as u128)"));
+        assert!(art.lib_rs.contains("map_set_u128"));
+    }
+
+    #[test]
+    fn require_with_string_reason_parses() {
+        let src = r#"
+            contract Req {
+                uint256 x;
+                function setp(uint256 v) public { require(v > 0, "must be positive"); x = v; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("if !((v > 0u128)) { revert(); }"));
     }
 }

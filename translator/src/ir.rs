@@ -2,6 +2,7 @@
 pub enum Type {
     Bool,
     U128,
+    I128,
     U256,
     AccountId,
     String,
@@ -13,7 +14,7 @@ pub enum Type {
 pub enum Mutability { View, Mutating, Payable }
 
 #[derive(Debug, Clone)]
-pub struct Field { pub name: String, pub ty: Type }
+pub struct Field { pub name: String, pub ty: Type, pub public: bool }
 
 #[derive(Debug, Clone)]
 pub struct Param { pub name: String, pub ty: Type }
@@ -32,7 +33,8 @@ pub struct Function {
     pub name: String,
     pub mutability: Mutability,
     pub params: Vec<Param>,
-    pub returns: Option<Type>,
+    /// Return types in declaration order. Empty = no return.
+    pub returns: Vec<Type>,
     pub body: Vec<String>,
 }
 

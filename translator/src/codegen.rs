@@ -8,6 +8,7 @@ pub fn render_type(t: &Type) -> String {
     match t {
         Type::Bool => "bool".into(),
         Type::U128 => "u128".into(),
+        Type::I128 => "i128".into(),
         Type::U256 => "U256".into(),
         Type::AccountId => "AccountId".into(),
         Type::String => "String".into(),
@@ -153,10 +154,14 @@ pub fn emit_contract(c: &Contract) -> String {
             _ => "&mut self",
         };
 
-        // Return type
-        let ret_ty = match &msg.returns {
-            Some(t) => render_type(t),
-            None => "()".into(),
+        // Return type (ink! path supports a single return; tuple for multi).
+        let ret_ty = match msg.returns.as_slice() {
+            [] => "()".into(),
+            [t] => render_type(t),
+            many => format!(
+                "({})",
+                many.iter().map(render_type).collect::<Vec<_>>().join(", ")
+            ),
         };
 
         let params_rendered = render_params(&msg.params);
@@ -252,7 +257,7 @@ mod module_tests {
     fn sample() -> Contract {
         Contract {
             name: "Token".into(),
-            storage: vec![Field { name: "totalSupply_".into(), ty: Type::U128 }],
+            storage: vec![Field { name: "totalSupply_".into(), ty: Type::U128, public: false }],
             events: vec![Event {
                 name: "Transfer".into(),
                 fields: vec![
@@ -265,14 +270,14 @@ mod module_tests {
                 name: "new".into(),
                 mutability: Mutability::Mutating,
                 params: vec![Param { name: "initialSupply".into(), ty: Type::U128 }],
-                returns: None,
+                returns: vec![],
                 body: vec!["self.totalSupply_ = initialSupply;".into()],
             }),
             messages: vec![Function {
                 name: "balanceOf".into(),
                 mutability: Mutability::View,
                 params: vec![Param { name: "who".into(), ty: Type::AccountId }],
-                returns: Some(Type::U128),
+                returns: vec![Type::U128],
                 body: vec!["return Ok(0);".into()],
             }],
         }
@@ -310,7 +315,7 @@ mod module_tests {
             name: "deposit".into(),
             mutability: Mutability::Payable,
             params: vec![],
-            returns: None,
+            returns: vec![],
             body: vec![],
         });
         let src = emit_contract(&c);
@@ -331,7 +336,7 @@ mod module_tests {
             name: "mint".into(),
             mutability: Mutability::Mutating,
             params: vec![Param { name: "amount".into(), ty: Type::U128 }],
-            returns: None,
+            returns: vec![],
             body: vec![],
         });
         let src = emit_contract(&c);
