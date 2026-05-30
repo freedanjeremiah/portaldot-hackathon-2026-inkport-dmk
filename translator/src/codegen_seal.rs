@@ -130,6 +130,15 @@ struct SealCtx<'a> {
     events: &'a [crate::ir::Event],
     /// Local variable -> runtime kind (params).
     locals: BTreeMap<String, ValTy>,
+    /// Variable name -> declared *narrow* bit-width N (1..=127) for numeric
+    /// types. Wide numeric types (uint128/uint256/uint, int128/int256/int) are
+    /// intentionally absent: absence means "fail-safe wide" (the existing
+    /// checked_* at the u128/i128 boundary already reverts correctly). Covers
+    /// storage scalars, params and locals.
+    widths: BTreeMap<String, u32>,
+    /// When true, arithmetic is being lowered inside a Solidity `unchecked { }`
+    /// block: narrow ops wrap (mask to the type width) instead of reverting.
+    unchecked: bool,
     /// `constant` variables inlined at compile time: name -> (rust literal, kind).
     constants: &'a BTreeMap<String, (String, ValTy)>,
     /// Enum value names -> their u8 ordinal (rendered as a u128 literal).
@@ -160,6 +169,8 @@ impl<'a> SealCtx<'a> {
             slots,
             events,
             locals: BTreeMap::new(),
+            widths: BTreeMap::new(),
+            unchecked: false,
             constants,
             enum_values,
             structs,
@@ -452,24 +463,129 @@ impl<'a> SealCtx<'a> {
         self.expr_ty(e).0
     }
 
-    /// Render a checked arithmetic op, propagating signedness. If either operand
-    /// is signed, both are coerced to `i128` and the result is signed.
+    /// Infer the Solidity *declared* bit-width of a numeric expression.
+    ///
+    /// Returns `Some(N)` only for a *narrow* width (1..=127) whose overflow
+    /// semantics differ from the u128/i128 boundary; returns `None` for wide
+    /// types (uint128/uint256/uint, int128/int256/int) and non-numeric or
+    /// width-unknown shapes — the caller treats `None` as the fail-safe wide
+    /// case (existing checked_* at 128 bits already reverts correctly, and
+    /// `unchecked` wraps at 128 bits via `wrapping_*`).
+    ///
+    /// Width composition mirrors Solidity: a literal has no intrinsic width
+    /// (`None`) and adopts its sibling operand's width; a binary op's width is
+    /// the wider of its operands; an explicit `uintN(x)`/`intN(x)` cast yields
+    /// width N.
+    fn expr_width(&self, e: &Expression) -> Option<u32> {
+        match e {
+            Expression::Parenthesis(_, inner) => self.expr_width(inner),
+
+            // Variables: storage scalar / param / local declared width.
+            Expression::Variable(id) => self.widths.get(&id.name).copied(),
+
+            // Literals carry no intrinsic width.
+            Expression::NumberLiteral(..)
+            | Expression::HexNumberLiteral(..)
+            | Expression::BoolLiteral(..) => None,
+
+            // Binary numeric ops: result width = max of operand widths.
+            Expression::Add(_, l, r)
+            | Expression::Subtract(_, l, r)
+            | Expression::Multiply(_, l, r)
+            | Expression::Divide(_, l, r)
+            | Expression::Modulo(_, l, r)
+            | Expression::BitwiseAnd(_, l, r)
+            | Expression::BitwiseOr(_, l, r)
+            | Expression::BitwiseXor(_, l, r) => max_width(self.expr_width(l), self.expr_width(r)),
+
+            // Shift result width = the left operand's width.
+            Expression::ShiftLeft(_, l, _) | Expression::ShiftRight(_, l, _) => self.expr_width(l),
+
+            Expression::BitwiseNot(_, inner) | Expression::Not(_, inner) => self.expr_width(inner),
+
+            // Explicit width casts `uintN(x)` / `intN(x)`.
+            Expression::FunctionCall(_, callee, _) => match callee.as_ref() {
+                Expression::Type(_, PtType::Uint(n)) | Expression::Type(_, PtType::Int(n)) => {
+                    narrow_width(*n)
+                }
+                Expression::Variable(id) => cast_name_width(&id.name),
+                _ => None,
+            },
+
+            // Mapping/array element read: width is the declared value width,
+            // which we don't currently thread (stored as u128/i128). Treat as
+            // wide — fail-safe, never a silent narrow miscompile.
+            _ => None,
+        }
+    }
+
+    /// Render a checked arithmetic op, propagating signedness and applying the
+    /// Solidity width semantics:
+    ///
+    /// * default (checked) mode + narrow width N: revert if the u128/i128
+    ///   result falls outside the type's range (`[0, 2^N-1]` unsigned;
+    ///   `[-2^(N-1), 2^(N-1)-1]` signed).
+    /// * `unchecked { }` + narrow width N: wrap to the type width
+    ///   (`& MASK_N` unsigned, sign-extend-from-N signed).
+    /// * wide (≥128): existing `checked_*` (checked) / `wrapping_*` (unchecked).
     fn arith(&mut self, l: &Expression, r: &Expression, op: &str) -> (String, ValTy) {
+        let width = max_width(self.expr_width(l), self.expr_width(r));
         let (ls, lt) = self.expr_ty(l);
         let (rs, rt) = self.expr_ty(r);
         let signed = lt == ValTy::SNum || rt == ValTy::SNum;
         if signed {
             let lc = coerce_num(&ls, lt, ValTy::SNum);
             let rc = coerce_num(&rs, rt, ValTy::SNum);
-            (
-                format!("({lc}).{op}({rc}).unwrap_or_else(|| revert())"),
-                ValTy::SNum,
-            )
+            (self.num_binop(&lc, &rc, op, width, true), ValTy::SNum)
         } else {
-            (
-                format!("({ls}).{op}({rs}).unwrap_or_else(|| revert())"),
-                ValTy::Num,
-            )
+            (self.num_binop(&ls, &rs, op, width, false), ValTy::Num)
+        }
+    }
+
+    /// Emit a width-aware numeric binary op. `op` is a `checked_*` method name.
+    /// `width` is the result's narrow width (`None` = wide/fail-safe). `signed`
+    /// selects i128 vs u128 semantics. Honors `self.unchecked`.
+    fn num_binop(&self, lc: &str, rc: &str, op: &str, width: Option<u32>, signed: bool) -> String {
+        match (self.unchecked, width) {
+            // ---- checked (default) ----
+            (false, None) => {
+                // Wide: existing fail-safe checked at the 128-bit boundary.
+                format!("({lc}).{op}({rc}).unwrap_or_else(|| revert())")
+            }
+            (false, Some(n)) if signed => {
+                let (lo, hi) = signed_bounds(n);
+                format!(
+                    "{{ let __r = ({lc}).{op}({rc}).unwrap_or_else(|| revert()); \
+                     if __r < {lo}i128 || __r > {hi}i128 {{ revert() }} __r }}"
+                )
+            }
+            (false, Some(n)) => {
+                let mask = unsigned_mask(n);
+                format!(
+                    "{{ let __r = ({lc}).{op}({rc}).unwrap_or_else(|| revert()); \
+                     if __r > {mask}u128 {{ revert() }} __r }}"
+                )
+            }
+            // ---- unchecked (wrap) ----
+            (true, None) => {
+                let wrap = wrapping_of(op);
+                format!("({lc}).{wrap}({rc})")
+            }
+            (true, Some(n)) if signed => {
+                let wrap = wrapping_of(op);
+                // Wrap at the 128-bit op, then reduce modulo 2^N into the
+                // signed range by sign-extending the low N bits: shift the
+                // sign bit (bit N-1) up to bit 127 then arithmetic-shift back.
+                let sh = 128 - n;
+                format!(
+                    "((((({lc}).{wrap}({rc})) << {sh}u32) >> {sh}u32))"
+                )
+            }
+            (true, Some(n)) => {
+                let wrap = wrapping_of(op);
+                let mask = unsigned_mask(n);
+                format!("(({lc}).{wrap}({rc}) & {mask}u128)")
+            }
         }
     }
 
@@ -492,11 +608,16 @@ impl<'a> SealCtx<'a> {
         format!("(({ls}) {op} ({rs}))")
     }
 
-    /// Bitwise shift `<< >>` (wrapping on the shift amount as u32).
+    /// Bitwise shift `<< >>` (wrapping on the shift amount as u32). Solidity's
+    /// `<<`/`>>` never revert — a left shift truncates to the type width — so a
+    /// narrow left operand masks the result to its width regardless of
+    /// checked/unchecked context.
     fn shift(&mut self, l: &Expression, r: &Expression, method: &str) -> String {
+        let width = self.expr_width(l);
         let (ls, _) = self.expr_ty(l);
         let (rs, _) = self.expr_ty(r);
-        format!("(({ls}).{method}(({rs}) as u32))")
+        let raw = format!("(({ls}).{method}(({rs}) as u32))");
+        mask_narrow(&raw, width)
     }
 
     /// If `e` is a mapping access `m[k]` or `m[a][b]` rooted at a storage
@@ -782,8 +903,18 @@ impl<'a> SealCtx<'a> {
     /// Render a statement into Rust source lines.
     fn stmt(&mut self, s: &Statement) -> Vec<String> {
         match s {
-            Statement::Block { statements, .. } => {
-                statements.iter().flat_map(|st| self.stmt(st)).collect()
+            Statement::Block { statements, unchecked, .. } => {
+                // Honor Solidity `unchecked { }`: arithmetic inside wraps to the
+                // type width instead of reverting. Nested blocks inherit the
+                // flag; restore the prior state on exit.
+                let prev = self.unchecked;
+                if *unchecked {
+                    self.unchecked = true;
+                }
+                let out: Vec<String> =
+                    statements.iter().flat_map(|st| self.stmt(st)).collect();
+                self.unchecked = prev;
+                out
             }
 
             Statement::Expression(_, e) => self.expr_stmt(e),
@@ -910,6 +1041,13 @@ impl<'a> SealCtx<'a> {
                 }
                 // Locals are `mut` (loop counters / reassigned vars); the crate
                 // sets `#![allow(unused_mut)]`.
+                // Record the local's declared narrow width (if any) so later
+                // arithmetic on it applies the correct overflow semantics.
+                if let Some(w) = pt_type_width(&decl.ty) {
+                    self.widths.insert(name.clone(), w);
+                } else {
+                    self.widths.remove(&name);
+                }
                 if let Some(rhs) = init {
                     let (v, t) = self.expr_ty(rhs);
                     self.locals.insert(name.clone(), t);
@@ -960,13 +1098,16 @@ impl<'a> SealCtx<'a> {
     fn compound(&mut self, lhs: &Expression, rhs: &Expression, op: &str) -> Vec<String> {
         // Read current value, apply checked op, write back. Implemented by
         // synthesizing `lhs = (lhs).op(rhs)` through the normal read/write paths.
+        // The result is bounded by the lvalue's declared width (Solidity
+        // evaluates `a OP= b` at the type of `a`).
+        let width = self.expr_width(lhs);
         let (cur, ct) = self.expr_ty(lhs);
         let (val, vt) = self.expr_ty(rhs);
         let signed = ct == ValTy::SNum || vt == ValTy::SNum;
         let target = if signed { ValTy::SNum } else { ValTy::Num };
         let lc = coerce_num(&cur, ct, target);
         let rc = coerce_num(&val, vt, target);
-        let combined = format!("({lc}).{op}({rc}).unwrap_or_else(|| revert())");
+        let combined = self.num_binop(&lc, &rc, op, width, signed);
         self.write_back(lhs, &combined, target)
     }
 
@@ -980,17 +1121,21 @@ impl<'a> SealCtx<'a> {
 
     /// Compound shift assignment `lhs <<= rhs` / `lhs >>= rhs`.
     fn compound_shift(&mut self, lhs: &Expression, rhs: &Expression, method: &str) -> Vec<String> {
+        let width = self.expr_width(lhs);
         let (cur, ct) = self.expr_ty(lhs);
         let (val, _) = self.expr_ty(rhs);
-        let combined = format!("(({cur}).{method}(({val}) as u32))");
+        let raw = format!("(({cur}).{method}(({val}) as u32))");
+        let combined = mask_narrow(&raw, width);
         self.write_back(lhs, &combined, ct)
     }
 
     /// `n++` / `n--` as a statement: read, checked +/-1, write back.
     fn incdec(&mut self, target: &Expression, op: &str) -> Vec<String> {
+        let width = self.expr_width(target);
         let (cur, ct) = self.expr_ty(target);
-        let one = if ct == ValTy::SNum { "1i128" } else { "1u128" };
-        let combined = format!("({cur}).{op}({one}).unwrap_or_else(|| revert())");
+        let signed = ct == ValTy::SNum;
+        let one = if signed { "1i128" } else { "1u128" };
+        let combined = self.num_binop(&cur, one, op, width, signed);
         self.write_back(target, &combined, ct)
     }
 
@@ -1324,6 +1469,79 @@ fn coerce_num(src: &str, from: ValTy, to: ValTy) -> String {
         ValTy::SNum => format!("({src} as i128)"),
         ValTy::Num => format!("({src} as u128)"),
         _ => src.to_string(),
+    }
+}
+
+/// The wider of two optional narrow widths (`None` = wide, dominates only when
+/// both are `None`; any concrete narrow width is "narrower" than wide and is
+/// what bounds the Solidity result type).
+fn max_width(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// Narrow width predicate: solang reports `uintN`/`intN` bit-widths in `n`.
+/// Only widths strictly below 128 have semantics differing from the u128/i128
+/// boundary; 128 and above are fail-safe wide (`None`).
+fn narrow_width(n: u16) -> Option<u32> {
+    let n = n as u32;
+    if (1..128).contains(&n) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Narrow width from a textual `uintN`/`intN`/`uint`/`int` cast name.
+fn cast_name_width(name: &str) -> Option<u32> {
+    let digits = if let Some(rest) = name.strip_prefix("uint") {
+        rest
+    } else if let Some(rest) = name.strip_prefix("int") {
+        rest
+    } else {
+        return None;
+    };
+    if digits.is_empty() {
+        // `uint`/`int` == 256-bit -> wide.
+        return None;
+    }
+    digits.parse::<u16>().ok().and_then(narrow_width)
+}
+
+/// `2^N - 1` as a decimal string, the inclusive upper bound of `uintN`.
+fn unsigned_mask(n: u32) -> String {
+    (((1u128) << n) - 1).to_string()
+}
+
+/// Inclusive `(lo, hi)` two's-complement bounds of `intN` as decimal strings.
+fn signed_bounds(n: u32) -> (String, String) {
+    let hi = ((1i128) << (n - 1)) - 1;
+    let lo = -((1i128) << (n - 1));
+    (lo.to_string(), hi.to_string())
+}
+
+/// Mask a rendered numeric expression to a narrow width (`& (2^N-1)`), used for
+/// shift results which truncate rather than revert. Wide width (`None`) is a
+/// no-op.
+fn mask_narrow(expr: &str, width: Option<u32>) -> String {
+    match width {
+        Some(n) => format!("(({expr}) & {}u128)", unsigned_mask(n)),
+        None => expr.to_string(),
+    }
+}
+
+/// The `wrapping_*` counterpart of a `checked_*` method name.
+fn wrapping_of(op: &str) -> &'static str {
+    match op {
+        "checked_add" => "wrapping_add",
+        "checked_sub" => "wrapping_sub",
+        "checked_mul" => "wrapping_mul",
+        "checked_div" => "wrapping_div",
+        "checked_rem" => "wrapping_rem",
+        _ => "wrapping_add",
     }
 }
 
@@ -1933,7 +2151,11 @@ pub fn emit_seal(
     let ctor_body_lines: Vec<String> = if let Some(ctor) = &c.constructor {
         let fdef = find_function(def, true, "");
         let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
+        register_storage_widths(&mut ctx, def);
         register_params(&mut ctx, &ctor.params);
+        if let Some(fdef) = fdef {
+            register_param_widths(&mut ctx, fdef);
+        }
         let mut lines = decode_params_prelude(&ctor.params, false);
         if let Some(fdef) = fdef {
             if let Some(body) = &fdef.body {
@@ -1967,6 +2189,8 @@ pub fn emit_seal(
             if let Some(is_fallback) = kind {
                 if let Some(body) = &f.body {
                     let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
+                    register_storage_widths(&mut ctx, def);
+                    register_param_widths(&mut ctx, f);
                     let mut lines: Vec<String> = Vec::new();
                     for mname in function_modifiers(f) {
                         if let Some(guards) = modifiers.get(&mname) {
@@ -2027,7 +2251,11 @@ pub fn emit_seal(
 
         let fdef = find_function_overload(def, &msg.name, &msg.params, uint_strategy);
         let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
+        register_storage_widths(&mut ctx, def);
         register_params(&mut ctx, &msg.params);
+        if let Some(fdef) = fdef {
+            register_param_widths(&mut ctx, fdef);
+        }
         ctx.ret_kinds = msg.returns.iter().map(ValTy::from_type).collect();
 
         let mut body_lines: Vec<String> = decode_params_prelude(&msg.params, true);
@@ -2313,6 +2541,42 @@ fn ret_rust_ty(t: &Type) -> &'static str {
 fn register_params(ctx: &mut SealCtx, params: &[crate::ir::Param]) {
     for p in params {
         ctx.locals.insert(p.name.clone(), ValTy::from_type(&p.ty));
+    }
+}
+
+/// Narrow width of a parse-tree type expression, if any (`uintN`/`intN`,
+/// N<128). Wide / non-numeric types yield `None`.
+fn pt_type_width(ty: &Expression) -> Option<u32> {
+    match ty {
+        Expression::Type(_, PtType::Uint(n)) | Expression::Type(_, PtType::Int(n)) => {
+            narrow_width(*n)
+        }
+        Expression::Variable(id) => cast_name_width(&id.name),
+        Expression::Parenthesis(_, inner) => pt_type_width(inner),
+        _ => None,
+    }
+}
+
+/// Register declared narrow widths for a contract's storage scalar variables.
+fn register_storage_widths(ctx: &mut SealCtx, def: &ContractDefinition) {
+    for part in &def.parts {
+        if let ContractPart::VariableDefinition(v) = part {
+            if let (Some(name), Some(w)) = (&v.name, pt_type_width(&v.ty)) {
+                ctx.widths.insert(name.name.clone(), w);
+            }
+        }
+    }
+}
+
+/// Register declared narrow widths for a function's parameters from the raw
+/// parse-tree definition (the IR has already collapsed widths to u128/i128).
+fn register_param_widths(ctx: &mut SealCtx, fdef: &FunctionDefinition) {
+    for (_, opt_p) in &fdef.params {
+        if let Some(p) = opt_p {
+            if let (Some(id), Some(w)) = (&p.name, pt_type_width(&p.ty)) {
+                ctx.widths.insert(id.name.clone(), w);
+            }
+        }
     }
 }
 
@@ -3429,5 +3693,100 @@ mod tests {
             function f(address t) public view returns (uint256) { return INope(t).nope(); } }"#;
         let err = translate_seal(src).unwrap_err();
         assert!(err.contains("unsupported") || err.contains("function call"), "got: {err}");
+    }
+
+    // ---- integer bit-width semantics (Wave E) ----
+
+    #[test]
+    fn width_helpers_compute_bounds() {
+        assert_eq!(unsigned_mask(8), "255");
+        assert_eq!(unsigned_mask(16), "65535");
+        assert_eq!(unsigned_mask(32), "4294967295");
+        assert_eq!(signed_bounds(8), ("-128".to_string(), "127".to_string()));
+        assert_eq!(narrow_width(8), Some(8));
+        assert_eq!(narrow_width(128), None);
+        assert_eq!(narrow_width(256), None);
+        assert_eq!(cast_name_width("uint8"), Some(8));
+        assert_eq!(cast_name_width("uint256"), None);
+        assert_eq!(cast_name_width("uint"), None);
+        assert_eq!(max_width(Some(8), None), Some(8));
+        assert_eq!(max_width(Some(8), Some(16)), Some(16));
+        assert_eq!(max_width(None, None), None);
+    }
+
+    #[test]
+    fn uint8_checked_add_reverts_out_of_range() {
+        // uint8 + must revert when the result exceeds 255.
+        let src = r#"
+            contract C {
+                uint8 x;
+                function addc(uint8 n) public { x = x + n; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(
+            art.lib_rs.contains("if __r > 255u128 { revert() }"),
+            "expected uint8 range check, got body:\n{}",
+            art.lib_rs
+        );
+        assert!(art.lib_rs.contains("checked_add(n)"));
+    }
+
+    #[test]
+    fn uint16_checked_add_uses_65535_bound() {
+        let src = r#"
+            contract C {
+                function f(uint16 a, uint16 b) public pure returns (uint16) { return a + b; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("if __r > 65535u128 { revert() }"), "{}", art.lib_rs);
+    }
+
+    #[test]
+    fn uint8_unchecked_add_wraps_and_masks() {
+        let src = r#"
+            contract C {
+                function wrap(uint8 a) public pure returns (uint8) {
+                    unchecked { return a + 1; }
+                }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(
+            art.lib_rs.contains("(a).wrapping_add(1u128) & 255u128"),
+            "expected wrapping mask, got:\n{}",
+            art.lib_rs
+        );
+        // The checked range-check form must NOT appear inside an unchecked block.
+        assert!(!art.lib_rs.contains("if __r > 255u128"));
+    }
+
+    #[test]
+    fn wide_uint256_keeps_plain_checked_add() {
+        // uint256/uint -> wide: no narrow range check, fail-safe checked_* at 128.
+        let src = r#"
+            contract C {
+                uint256 t;
+                function inc(uint256 n) public { t = t + n; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("checked_add(n).unwrap_or_else(|| revert())"));
+        assert!(!art.lib_rs.contains("if __r >"), "wide type must not get a narrow check");
+    }
+
+    #[test]
+    fn uint8_unchecked_mul_wraps() {
+        let src = r#"
+            contract C {
+                function m(uint8 a, uint8 b) public pure returns (uint8) {
+                    unchecked { return a * b; }
+                }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("wrapping_mul"), "{}", art.lib_rs);
+        assert!(art.lib_rs.contains("& 255u128"), "{}", art.lib_rs);
     }
 }

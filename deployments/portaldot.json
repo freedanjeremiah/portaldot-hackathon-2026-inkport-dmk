@@ -1,3 +1,14 @@
 {
-  "ERC20": "5HcQTX3kYCANZVLesSkaEX2Wnk6Fp5xYzMxTtc4PqcBCgvoZ"
+  "ERC20": "5HcQTX3kYCANZVLesSkaEX2Wnk6Fp5xYzMxTtc4PqcBCgvoZ",
+  "Overload3": "5H91hBbeoeo4AgJ6ExEkoSfnUuh5uiBskuHZXS5KxhRNooKg",
+  "P02_const_overflow": "5FKZHPSibxzVDBjJj5z66thEN4VBbPUAsSRN8UKjePvZ59m5",
+  "P15_unchecked": "5GoSigMgPTVitS7LQDTna7ENWsGhpz6BZPti53KECW7EJUjc",
+  "P01_override": "5FXotTaHZiH8s78JVjEtmv7dh2RETgQ95Fnb2ffnevzADLQb",
+  "P18_inheritance_chain": "5DFqpt4bM48eXx9R5nAB22Qs2WdF1j4oE646ZyLP5gPmieng",
+  "P13_modifier_args": "5ELu95kMYGVVrbAx4q8qWi8TqBqJYx1iscEu1F3kZR4PRqAU",
+  "P11_bytes32": "5EGKx9X2B7JbGjk48m7gMybm4nRtBsYL6WVFgQSqj4yEaxHh",
+  "POV_uint256": "5GntQVYgXKfGSBr7KMRhM7r4Tt2CvNuHSuq8CmBNv98B7Vxm",
+  "NarrowMath": "5Eb2ytmmRtv8BmkmzdvFxfYKZRB41BUnRZEJFM6soanHQ2Ff",
+  "Unchecked": "5CTRUPL22q3zVfmacaEZaP41FJgKMq8knDNmhX32viUM4PXX",
+  "Narrow16": "5DULpdibQFCCWKZi7KDyqUizMPZZ1KpT3EdUCNXhZ71MSHg3"
 }

@@ -222,6 +222,22 @@ def call(
     p = portaldot.Portaldot(url=net["url"], suri=signer)
     try:
         if m.get("mutates"):
+            # Contracts.call's extrinsic success reflects dispatch, not a
+            # contract revert. Dry-run first and honor the revert bit
+            # (flags & 1) — mirror the read path — so a reverting mutating
+            # message reports a clear error with a non-zero exit instead of a
+            # bogus `-> ok`.
+            origin = p.signer(signer).ss58_address
+            dr = p.s.rpc_request("contracts_call", [{
+                "origin": origin, "dest": addr, "value": value_planck,
+                "gasLimit": portaldot.GAS, "inputData": data}])["result"]
+            dres = dr["result"]
+            reverted = "Ok" not in dres
+            if not reverted and "Ok" in dres:
+                reverted = (int(dres["Ok"].get("flags", 0)) & 1) == 1
+            if reverted:
+                _err(f"{message} reverted: {dres}")
+                raise typer.Exit(1)
             kp = p.signer(signer)
             rcpt = p.call(addr, data, value=value_planck, keypair=kp)
             evs = p.events(rcpt)
@@ -380,6 +396,21 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
                 signer = step.get("signer", deployer)
 
                 if action == "call":
+                    # The Contracts.call extrinsic's `is_success` reflects only
+                    # the *dispatch* result, not a contract-level revert — a
+                    # reverting message still lands on-chain as a "successful"
+                    # extrinsic. Dry-run first (contracts_call) and honor the
+                    # revert bit (flags & 1) so a silent revert FAILS the step
+                    # instead of being reported as a pass.
+                    origin = p.signer(signer).ss58_address
+                    dr = p.s.rpc_request("contracts_call", [{
+                        "origin": origin, "dest": addr, "value": _val(step),
+                        "gasLimit": portaldot.GAS, "inputData": data}])["result"]
+                    dres = dr["result"]
+                    reverted = "Ok" not in dres
+                    if not reverted and "Ok" in dres:
+                        reverted = (int(dres["Ok"].get("flags", 0)) & 1) == 1
+                    assert not reverted, f"{msg}({_fmt(args)}) reverted: {dres}"
                     kp = p.signer(signer)
                     rcpt = p.call(addr, data, value=_val(step), keypair=kp)
                     last_events = list(p.events(rcpt))
