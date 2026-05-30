@@ -1,6 +1,6 @@
 target/
 **/target/
-build/
+/build/
 .venv/
 __pycache__/
 *.pyc
@@ -8,7 +8,7 @@ __pycache__/
 Cargo.lock
 .env
 deployments/
-build/
+/build/
 
 # playground
 playground/node_modules/
