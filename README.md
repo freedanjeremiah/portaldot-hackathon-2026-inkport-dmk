@@ -46,6 +46,14 @@ inkport test ERC20                         # run tests/ERC20.json on-chain asser
 inkport all                                # translate+build+deploy+test every contract
 ```
 
+Every `deploy`, `test`, and `all` run saves the deployed contract address to
+`deployments/<network>.json` (e.g. `deployments/portaldot.json`). `inkport call`
+reads from that file. The 30 live addresses from the latest `inkport all` run are
+committed at `deployments/portaldot.json`.
+
+```
+```
+
 Network/signers live in `inkport.config.py` (Portaldot wss, decimals 14, ss58 42, default
 `//Alice`). Dev accounts `//Alice`/`//Bob`/`//Charlie` are accepted wherever an `address`
 arg is expected (resolved to the 32-byte AccountId).
@@ -109,6 +117,7 @@ contract-language subset above.
 | `inkport/` | Python `inkport` CLI (translate/build/deploy/call/test/all) |
 | `inkport_chain/` | Portaldot client, wasm stripper, metadata-driven test harness |
 | `contracts/` | Solidity fixtures | `tests/` | on-chain test specs |
+| `deployments/` | Live contract addresses per network (`portaldot.json`) |
 | `docs/seal-backend-spec.md` | the codegen ABI/storage/runtime contract |
 
 ## License
