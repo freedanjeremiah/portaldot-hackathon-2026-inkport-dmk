@@ -1,0 +1,28 @@
+export const metadata = { title: 'inkport build — CLI Reference' };
+
+<div className="docs-tag">CLI Reference</div>
+
+# inkport build
+
+Compile a translated contract to stripped MVP wasm.
+
+```bash
+inkport build <Name>
+```
+
+Runs `cargo +stable build --release --target wasm32-unknown-unknown` on `build/<Name>/`, then strips the wasm to the MVP subset the Portaldot node accepts.
+
+**What "stripped" means:** The node rejects `memory.fill` / `memory.copy` (bulk-memory) and unknown exports (`__data_end`, `__heap_base`). The stripper keeps only `call` / `deploy` exports + imported memory with max declared.
+
+**Output:**
+
+```
+build/<Name>/<Name>.wasm    ← stripped, Portaldot-ready
+```
+
+**Example:**
+
+```bash
+inkport build ERC20
+# ✓ ERC20.wasm — 4 321 bytes stripped
+```
