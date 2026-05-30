@@ -146,7 +146,7 @@ export default function WhyInkPortPage() {
             <Link href="/docs/getting-started/install" className="btn btn-primary btn-lg">
               Read the getting started guide
             </Link>
-            <Link href="/" className="btn btn-lg">
+            <Link href="/playground" className="btn btn-lg">
               Try the playground
             </Link>
           </div>

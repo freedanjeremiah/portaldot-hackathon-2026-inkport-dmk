@@ -235,7 +235,6 @@ export default function PlaygroundPage() {
 
   return (
     <div className="app">
-      {/* Inline burn SVG filter for the parchment torn-edge effect */}
       <svg width="0" height="0" style={{ position: 'absolute', width: 0, height: 0 }}>
         <defs>
           <filter id="burn" x="-20%" y="-20%" width="140%" height="140%">
@@ -248,7 +247,7 @@ export default function PlaygroundPage() {
       <div className="pg-vignette" />
 
       <div className="topbar">
-        <a href="/home" className="topbar-back">
+        <a href="/" className="topbar-back">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M15 6l-6 6 6 6"/>
           </svg>
