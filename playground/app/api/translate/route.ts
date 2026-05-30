@@ -14,8 +14,11 @@ function parseName(solidity: string): string {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const { solidity, sessionId } = body as { solidity: string; sessionId: string };
+  let body: { solidity?: string; sessionId?: string };
+  try { body = await request.json(); } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+  const { solidity, sessionId } = body;
 
   if (!solidity || !sessionId) {
     return NextResponse.json({ error: 'Missing solidity or sessionId' }, { status: 400 });

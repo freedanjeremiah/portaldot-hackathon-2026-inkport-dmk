@@ -3,7 +3,10 @@ import { buildEnv } from '@/lib/env';
 import { spawnCollect } from '@/lib/shell';
 
 export async function POST(request: NextRequest) {
-  const body = await request.json() as { metadata?: { name: string }; message?: string; args?: string[] };
+  let body: { metadata?: { name: string }; message?: string; args?: string[] };
+  try { body = await request.json(); } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
   const { metadata, message, args } = body;
 
   if (!metadata?.name || !message) {
