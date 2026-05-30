@@ -1,0 +1,45 @@
+export const metadata = { title: 'Troubleshooting — InkPort Docs' };
+
+<div className="docs-tag">Troubleshooting</div>
+
+# Troubleshooting
+
+## System.Other on deploy
+
+**Cause:** The node rejected the wasm. Two most common reasons:
+
+1. **Bulk-memory instructions** (`memory.fill` / `memory.copy`) in the wasm. The codegen avoids these — if you wrote the Rust by hand, use `MaybeUninit` buffers and explicit byte loops. `-C target-feature=-bulk-memory` alone is not sufficient; the source must avoid the patterns.
+
+2. **Oversized deploy buffer.** A large fixed input buffer (e.g. 512 bytes) makes `instantiate_with_code` fail. The codegen sizes buffers to the SCALE payload.
+
+## Decoder class for "AccountInfo..." not found
+
+**Cause:** Connected without `type_registry_preset='substrate-node-template'`.
+
+**Fix:** The chain client sets this automatically. If you're using the SDK directly:
+
+```python
+SubstrateInterface(url=..., ss58_format=42, type_registry_preset="substrate-node-template")
+```
+
+## Dropped websocket mid-run
+
+The chain client reconnects and retries on dropped sockets automatically. If a run still flakes, re-run `inkport test <Name>` — it deploys a fresh instance, so a previous partial run doesn't affect the result.
+
+## inkport call prints "reverted"
+
+This is correct behavior, not a bug. A view call that hits `require(false)` or an overflow at a narrow width prints `reverted`. Check whether your arguments satisfy the contract's preconditions.
+
+## cargo contract / ink! errors
+
+InkPort does not use `cargo-contract` or ink!. The build command is plain `cargo +stable build --target wasm32-unknown-unknown`. If you see ink!-related errors, make sure you're running `inkport build` and not `cargo contract build`.
+
+## "Maximum number of pages should be always declared"
+
+The wasm memory import must have a max declared. The linker flags in `onchain-contracts/counter/.cargo/config.toml` show the required settings:
+
+```
+--import-memory --initial-memory=65536 --max-memory=65536
+```
+
+The codegen emits these via the crate's `.cargo/config.toml`. If you're writing a contract by hand, copy that config.

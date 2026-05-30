@@ -1,0 +1,41 @@
+export const metadata = { title: 'Portaldot Node — InkPort Reference' };
+
+<div className="docs-tag">Reference</div>
+
+# Portaldot node
+
+| Field | Value |
+|---|---|
+| Public WSS | `wss://portaldot.philotheephilix.in` |
+| Token | `POT` |
+| Decimals | 14 (1 POT = 10¹⁴ plancks) |
+| SS58 prefix | 42 |
+| Pallet | rent-era `pallet-contracts` (seal0 ABI, ~Substrate 2021) |
+| Faucet / Sudo | `//Alice` (`5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY`), pre-funded |
+| Existential deposit | 1 POT |
+| Default endowment | 10 POT (inkport deploy) |
+
+## Connection requirements
+
+Both parameters are **required** or `System.Account` won't decode:
+
+```python
+from substrateinterface import SubstrateInterface
+substrate = SubstrateInterface(
+    url="wss://portaldot.philotheephilix.in",
+    ss58_format=42,
+    type_registry_preset="substrate-node-template",
+)
+```
+
+Omitting `type_registry_preset` causes `Decoder class for "AccountInfo..." not found`.
+
+## Dev accounts
+
+| Account | SURI | Address |
+|---|---|---|
+| Alice | `//Alice` | `5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY` |
+| Bob | `//Bob` | `5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty` |
+| Charlie | `//Charlie` | `5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y` |
+
+> **Dev chain only.** No real value, state resets on node restart. Never reuse these keys anywhere with real value.

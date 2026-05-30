@@ -1,0 +1,72 @@
+export const metadata = { title: 'metadata.json Format — InkPort Reference' };
+
+<div className="docs-tag">Reference</div>
+
+# metadata.json format
+
+Emitted by `inkport translate`. Used by the CLI and harness to encode calls and decode returns.
+
+## Schema
+
+```json
+{
+  "name": "Counter",
+  "constructor": {
+    "args": ["u128"],
+    "argNames": ["initial"]
+  },
+  "messages": [
+    {
+      "name": "inc",
+      "selector": "0x371303c0",
+      "args": [],
+      "argNames": [],
+      "ret": null,
+      "mutates": true,
+      "payable": false
+    },
+    {
+      "name": "get",
+      "selector": "0x6d4ce63c",
+      "args": [],
+      "argNames": [],
+      "ret": "u128",
+      "mutates": false,
+      "payable": false
+    }
+  ],
+  "events": [
+    {
+      "name": "Transfer",
+      "fields": [
+        { "name": "from", "type": "address" },
+        { "name": "to",   "type": "address" },
+        { "name": "value","type": "u128"    }
+      ]
+    }
+  ]
+}
+```
+
+## Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Contract name |
+| `constructor.args` | string[] | SCALE types of constructor parameters |
+| `constructor.argNames` | string[] | Parameter names (for CLI prompts) |
+| `messages[].selector` | string | `0x` + first 4 bytes of `keccak256("name(canonicalTypes)")` |
+| `messages[].args` | string[] | SCALE types of message parameters |
+| `messages[].ret` | string \| null | SCALE type of return value, or null |
+| `messages[].mutates` | boolean | `true` → submitted as extrinsic; `false` → dry-run read |
+| `messages[].payable` | boolean | Whether the message accepts a value transfer |
+| `events[].fields` | array | Field names and SCALE types for `ContractEmitted` decoding |
+
+## Encoding
+
+- Call input = `selector (4 bytes) ++ SCALE(arg0) ++ SCALE(arg1) ++ ...`
+- Constructor input = `SCALE(arg0) ++ ...` (no selector)
+- `u128` = 16-byte little-endian
+- `bool` = 1 byte (`0x00` / `0x01`)
+- `address` = 32 bytes (SS58 decoded to AccountId)
+- `string`/`bytes` = compact-length prefix ++ UTF-8 bytes

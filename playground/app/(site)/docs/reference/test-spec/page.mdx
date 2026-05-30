@@ -1,0 +1,75 @@
+export const metadata = { title: 'Test Spec Format — InkPort Reference' };
+
+<div className="docs-tag">Reference</div>
+
+# Test spec format
+
+`tests/<Name>.json` drives `inkport test <Name>`. Each step is an action against the deployed contract.
+
+## Top-level
+
+```json
+{
+  "deployer": "//Alice",
+  "steps": [ ... ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `deployer` | SURI used for the deploy step |
+| `steps` | Ordered array of step objects |
+
+## Action types
+
+### deploy
+
+```json
+{ "action": "deploy", "args": [1000000] }
+```
+
+Calls `instantiate_with_code`. `args` = constructor arguments. Must be the first step.
+
+### read
+
+```json
+{ "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1000000 }
+```
+
+Dry-run read. Asserts decoded return value equals `expected`.
+
+### call
+
+```json
+{ "action": "call", "message": "transfer", "args": ["//Bob", 1000], "signer": "//Alice", "value": 0 }
+```
+
+Mutating extrinsic. `signer` defaults to `deployer`. `value` in POT for payable messages. Fails if the contract reverts.
+
+### event
+
+```json
+{ "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Bob", "value": 1000 } }
+```
+
+Asserts the named event was emitted by the preceding `call`, with matching fields.
+
+### revert
+
+```json
+{ "action": "revert", "message": "transfer", "args": ["//Bob", 1000000000], "signer": "//Charlie" }
+```
+
+Asserts the call reverts. Fails if it succeeds.
+
+### deploy_dep
+
+```json
+{ "action": "deploy_dep", "name": "Target", "args": [], "as": "target" }
+```
+
+Deploy a helper contract. Reference its address in subsequent steps with `"@target"`.
+
+## Address args
+
+`"//Alice"`, `"//Bob"`, `"//Charlie"` resolve to their 32-byte AccountId. `"0x..."` hex strings are also accepted.
