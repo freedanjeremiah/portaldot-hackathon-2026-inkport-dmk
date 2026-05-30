@@ -15,3 +15,9 @@ playground/node_modules/
 playground/.next/
 playground/next-env.d.ts
 playground/package-lock.json
+playground/.env.local
+playground/build/
+playground/tsconfig.tsbuildinfo
+
+# editor / tool state
+.claire/
