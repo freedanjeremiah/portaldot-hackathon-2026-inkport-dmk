@@ -6,7 +6,10 @@ import { sessionDir } from '@/lib/session';
 import { spawnCollect } from '@/lib/shell';
 
 function parseName(solidity: string): string {
-  const m = /contract\s+([A-Za-z_]\w*)/.exec(solidity);
+  const stripped = solidity
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')  // block comments
+    .replace(/\/\/[^\n]*/g, '');         // line comments
+  const m = /contract\s+([A-Za-z_]\w*)/.exec(stripped);
   return m ? m[1] : 'Contract';
 }
 

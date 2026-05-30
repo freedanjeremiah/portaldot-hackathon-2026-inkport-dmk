@@ -24,7 +24,9 @@ export async function POST(request: NextRequest) {
         const env = buildEnv();
         const inkportRoot = env.INKPORT_ROOT as string;
 
-        // Write wasm + metadata to INKPORT_ROOT/build/<name>/ where inkport deploy expects them
+        // Single-user constraint: playground writes to INKPORT_ROOT/build/<name>/ so inkport deploy
+        // can find the wasm and metadata. Concurrent playground sessions deploying the same contract
+        // name will collide. Do not run inkport all / inkport test concurrently with the playground.
         const buildDir = path.join(inkportRoot, 'build', name);
         fs.mkdirSync(path.join(buildDir, 'src'), { recursive: true });
         fs.writeFileSync(path.join(buildDir, `${name}.wasm`), Buffer.from(wasmB64, 'base64'));
