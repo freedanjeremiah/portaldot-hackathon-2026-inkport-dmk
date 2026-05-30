@@ -20,7 +20,7 @@ export default function PitchPage() {
       <section className="slide dots">
         <div className="slide-inner">
           <div className="brand reveal">
-            <div className="mark">I</div>
+            <div className="mark"><img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} /></div>
             <span className="bname">InkPort</span>
           </div>
           <h1 className="reveal d1" style={{ marginTop: 26 }}>
@@ -202,7 +202,7 @@ export default function PitchPage() {
       {/* 12 — CLOSE */}
       <section className="slide dots">
         <div className="slide-inner">
-          <div className="brand reveal"><div className="mark">I</div><span className="bname">InkPort</span></div>
+          <div className="brand reveal"><div className="mark"><img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} /></div><span className="bname">InkPort</span></div>
           <div className="big reveal d1" style={{ marginTop: 28 }}>Write Solidity.<br /><span className="grad">Ship on Portaldot.</span></div>
           <p className="sub reveal d2">30 contracts live on mainnet. Real POT gas. Zero silent miscompiles.</p>
           <div className="row reveal d3">

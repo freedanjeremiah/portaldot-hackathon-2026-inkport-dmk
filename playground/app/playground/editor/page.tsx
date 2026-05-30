@@ -289,7 +289,7 @@ function EditorInner() {
         </a>
         <div className="topbar-sep" />
         <div className="brand">
-          <div className="brand-mark"><Ic.bolt width={13} height={13} /></div>
+          <div className="brand-mark"><img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} /></div>
           <span className="brand-name">Ink<b>Port</b> Playground</span>
         </div>
         <span className="brand-sub">sol → seal0 → wasm</span>

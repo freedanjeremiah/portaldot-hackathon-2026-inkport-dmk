@@ -10,9 +10,7 @@ export default function SiteNav() {
       <div className="nav-inner">
         <Link href="/" className="nav-brand">
           <span className="nav-mark">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-              <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" strokeLinejoin="round"/>
-            </svg>
+            <img src="/inkport.png" alt="InkPort" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 'inherit' }} />
           </span>
           <span>Ink<b>Port</b></span>
         </Link>
