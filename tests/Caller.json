@@ -1,0 +1,10 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "deploy_dep", "name": "Target", "args": [42], "as": "T" },
+    { "action": "read", "message": "readValue", "args": ["@T"], "expected": 42 },
+    { "action": "call", "message": "pushValue", "args": ["@T", 77] },
+    { "action": "read", "message": "readValue", "args": ["@T"], "expected": 77 }
+  ]
+}

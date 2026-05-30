@@ -9,11 +9,26 @@
     { "action": "call", "message": "mint", "args": ["//Alice", 2], "signer": "//Alice" },
     { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 2 },
     { "action": "revert", "message": "mint", "args": ["//Bob", 1], "signer": "//Alice" },
-    { "action": "call", "message": "transferFrom", "args": ["//Alice", "//Bob", 1], "signer": "//Alice" },
-    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Bob", "id": 1 } },
-    { "action": "read", "message": "ownerOf", "args": [1], "expected": "//Bob" },
-    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1 },
-    { "action": "read", "message": "balanceOf", "args": ["//Bob"], "expected": 1 },
-    { "action": "revert", "message": "transferFrom", "args": ["//Charlie", "//Bob", 1], "signer": "//Charlie" }
+
+    { "action": "read", "message": "getApproved", "args": [1], "expected": "0x0000000000000000000000000000000000000000000000000000000000000000" },
+    { "action": "call", "message": "approve", "args": ["//Bob", 1], "signer": "//Alice" },
+    { "action": "event", "name": "Approval", "expected": { "owner": "//Alice", "approved": "//Bob", "id": 1 } },
+    { "action": "read", "message": "getApproved", "args": [1], "expected": "//Bob" },
+    { "action": "revert", "message": "approve", "args": ["//Charlie", 1], "signer": "//Charlie" },
+
+    { "action": "read", "message": "isApprovedForAll", "args": ["//Alice", "//Bob"], "expected": false },
+    { "action": "call", "message": "setApprovalForAll", "args": ["//Bob", true], "signer": "//Alice" },
+    { "action": "event", "name": "ApprovalForAll", "expected": { "owner": "//Alice", "operator": "//Bob", "approved": true } },
+    { "action": "read", "message": "isApprovedForAll", "args": ["//Alice", "//Bob"], "expected": true },
+
+    { "action": "call", "message": "transferFrom", "args": ["//Alice", "//Charlie", 1], "signer": "//Bob" },
+    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Charlie", "id": 1 } },
+    { "action": "read", "message": "ownerOf", "args": [1], "expected": "//Charlie" },
+    { "action": "read", "message": "getApproved", "args": [1], "expected": "0x0000000000000000000000000000000000000000000000000000000000000000" },
+
+    { "action": "call", "message": "transferFrom", "args": ["//Alice", "//Bob", 2], "signer": "//Alice" },
+    { "action": "read", "message": "ownerOf", "args": [2], "expected": "//Bob" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 0 },
+    { "action": "revert", "message": "transferFrom", "args": ["//Bob", "//Charlie", 2], "signer": "//Charlie" }
   ]
 }

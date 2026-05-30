@@ -297,9 +297,29 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
     addr = None
     last_events: list[bytes] = []
     passed = True
+    # Dependency contract addresses (for cross-contract tests), keyed by label.
+    deps: dict[str, str] = {}
 
     def _val(step) -> int:
         return int(step.get("value", 0)) * POT
+
+    def _resolve(raw_args):
+        """Substitute `@label` tokens with the dependency contract's address
+        (as a 0x-prefixed 32-byte pubkey hex), so cross-contract callers can
+        pass a deployed callee's address."""
+        out = []
+        for a in raw_args:
+            if isinstance(a, str) and a.startswith("@"):
+                label = a[1:]
+                if label not in deps:
+                    raise KeyError(f"dependency '{label}' not deployed (use deploy_dep)")
+                # AccountId32 ss58 -> 0x pubkey hex via the harness keypair.
+                from substrateinterface import Keypair
+                kp = Keypair(ss58_address=deps[label], ss58_format=net.get("ss58", 42))
+                out.append("0x" + kp.public_key.hex())
+            else:
+                out.append(a)
+        return out
 
     try:
         for i, step in enumerate(spec["steps"]):
@@ -312,6 +332,19 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
                     addr, _ = p.deploy(str(P.wasm_path(root, name)), ctor_data=data,
                                        endowment_pot=int(step.get("value", 10)))
                     typer.echo(f"  [PASS] deploy({ctor_args}) -> {addr}")
+                    continue
+
+                if action == "deploy_dep":
+                    dep_name = step["name"]
+                    dep_meta = P.load_metadata(root, dep_name)
+                    dep_ctor_types = dep_meta["constructor"]["args"]
+                    dep_args = P.coerce_args(dep_ctor_types, _resolve(step.get("args", [])))
+                    dep_data = test_contract.encode_ctor(dep_ctor_types, dep_args)
+                    dep_addr, _ = p.deploy(str(P.wasm_path(root, dep_name)),
+                                           ctor_data=dep_data,
+                                           endowment_pot=int(step.get("value", 10)))
+                    deps[step.get("as", dep_name)] = dep_addr
+                    typer.echo(f"  [PASS] deploy_dep {dep_name}({dep_args}) -> {dep_addr}")
                     continue
 
                 if action == "event":
@@ -334,7 +367,7 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
 
                 msg = step["message"]
                 m = P.message_by_name(meta, msg)
-                args = P.coerce_args(m["args"], step.get("args", []))
+                args = P.coerce_args(m["args"], _resolve(step.get("args", [])))
                 data = test_contract.encode_call(m["selector"], m["args"], args)
                 signer = step.get("signer", deployer)
 

@@ -1,0 +1,14 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "statusCode", "args": [], "expected": 0 },
+    { "action": "read", "message": "isActive", "args": [], "expected": false },
+    { "action": "call", "message": "activate", "args": [] },
+    { "action": "read", "message": "statusCode", "args": [], "expected": 1 },
+    { "action": "read", "message": "isActive", "args": [], "expected": true },
+    { "action": "call", "message": "close", "args": [] },
+    { "action": "read", "message": "statusCode", "args": [], "expected": 2 },
+    { "action": "read", "message": "isActive", "args": [], "expected": false }
+  ]
+}

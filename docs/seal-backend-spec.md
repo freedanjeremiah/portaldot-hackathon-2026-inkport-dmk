@@ -18,8 +18,16 @@ not ink!.
   - `uintN`/`uint256` → `u128` → 16 bytes little-endian.
   - `bool` → 1 byte (`00`/`01`).
   - `address` → `[u8;32]` (AccountId) → 32 bytes raw.
-- **Selectors**: deterministic. `selector = 0x000000NN`, NN = 1-based index of the message in
-  declaration order. Emit them in metadata so the harness/CLI knows them.
+- **Selectors**: real keccak-256 4-byte selectors = first 4 bytes of
+  `keccak256("name(t1,t2,...)")` with canonical Solidity ABI arg types
+  (`uint256`,`address`,`bool`,`int256`,`string`,`bytes`). ABI-compatible with
+  Ethereum tooling. Emitted in metadata; the harness/CLI uses the metadata
+  selector (never assumes sequential). A 4-byte selector collision is a hard
+  translate error.
+- **Event topics**: first topic = `keccak256("Event(t1,t2,...)")` (canonical
+  signature), precomputed at translate time and written as a byte literal into
+  the event's topic buffer. (The rent-era node does not surface topics; the
+  harness disambiguates events by decoding the data payload.)
 
 ## Storage model
 Assign each state variable a `u8` slot index in declaration order.
@@ -85,6 +93,32 @@ post-MVP features with `"Can't decode wasm code"`. Two rules the backend enforce
   buffers via explicit byte loops. The `target-feature=-bulk-memory` rustflag alone
   does **not** suppress these — the source must avoid the memset/memcpy.
 - Input buffers are still sized to the SCALE payload (not a fixed 512).
+
+## Round 4 (Wave C) capabilities
+- **Inheritance / interface flattening**: `contract C is A, B` merges base state
+  vars, functions, modifiers, events, structs, enums into C (C overrides win;
+  diamond bases de-duplicated). `interface`/`abstract`/bodyless function
+  declarations are NOT emitted (they are obligations). FAIL-LOUD on multiple
+  unrelated deployable contracts in one file, or a base not defined in the file.
+- **`constant`**: compile-time inlined literal everywhere (incl. its public
+  getter); takes no storage slot. FAIL-LOUD on a non-literal initializer.
+  `immutable` stays a real storage slot (written by the constructor).
+- **`receive()` / `fallback()`**: dispatched from `call()`'s default arm —
+  empty calldata → receive(); else fallback() (or revert if absent).
+- **enums**: lowered to `uint8` numeric; `Enum.Value` inlined as its ordinal.
+- **struct locals**: `Point memory p = Point(a,b); p.x` lowers each field to a
+  backing scalar local `__s_<var>_<field>`. (Struct args/returns across the ABI
+  boundary are out of scope; struct *storage* uses the mapping-of-struct path.)
+- **cross-contract calls** `IFoo(addr).bar(args)`: seal0 `seal_call` with the
+  keccak-4 selector ++ SCALE(args); the return is decoded per the interface's
+  declared type. The callee interface must be declared in the same file.
+
+## Known limitation
+- **uint256 is represented as `u128`** (16-byte LE), not true 256-bit. Arithmetic
+  is *checked* (`checked_add/mul/...` → `revert` on overflow), so values above
+  2^128 fail loud rather than silently wrapping; the SCALE harness encodes ≤16
+  bytes. True 256-bit `[u8;32]` math is deferred. `uintN`/`intN` with N≤128 map
+  to `u128`/`i128`.
 
 ## Validation requirement (zero mock)
 Every supported contract must: translate → `cargo build` to wasm → strip → **deploy to

@@ -108,6 +108,20 @@ struct Uses {
     now: bool,
     block_number: bool,
     balance: bool,
+    /// Cross-contract `seal_call`.
+    call: bool,
+}
+
+/// An external function signature usable as a cross-contract call target
+/// (declared on an `interface`/contract in the same file).
+#[derive(Debug, Clone)]
+pub struct ExternalFn {
+    /// keccak-256 4-byte selector of the canonical signature.
+    selector: [u8; 4],
+    /// Argument kinds in declaration order (for SCALE-encoding the call input).
+    args: Vec<ValTy>,
+    /// Return kind, if any. (Single-value returns only.)
+    ret: Option<ValTy>,
 }
 
 /// Lowering context for seal0 statement/expression generation.
@@ -116,6 +130,16 @@ struct SealCtx<'a> {
     events: &'a [crate::ir::Event],
     /// Local variable -> runtime kind (params).
     locals: BTreeMap<String, ValTy>,
+    /// `constant` variables inlined at compile time: name -> (rust literal, kind).
+    constants: &'a BTreeMap<String, (String, ValTy)>,
+    /// Enum value names -> their u8 ordinal (rendered as a u128 literal).
+    enum_values: &'a BTreeMap<String, u8>,
+    /// Struct definitions: name -> ordered (field, kind).
+    structs: &'a BTreeMap<String, Vec<(String, ValTy)>>,
+    /// In-scope struct-typed locals: var name -> (struct name).
+    local_structs: BTreeMap<String, String>,
+    /// External function signatures (by name) for cross-contract calls.
+    external_fns: &'a BTreeMap<String, ExternalFn>,
     uses: Uses,
     errors: Vec<String>,
     /// Declared return kinds, used to lower tuple `return (a, b)` statements
@@ -124,15 +148,32 @@ struct SealCtx<'a> {
 }
 
 impl<'a> SealCtx<'a> {
-    fn new(slots: &'a [Slot], events: &'a [crate::ir::Event]) -> Self {
+    fn new(
+        slots: &'a [Slot],
+        events: &'a [crate::ir::Event],
+        constants: &'a BTreeMap<String, (String, ValTy)>,
+        enum_values: &'a BTreeMap<String, u8>,
+        structs: &'a BTreeMap<String, Vec<(String, ValTy)>>,
+        external_fns: &'a BTreeMap<String, ExternalFn>,
+    ) -> Self {
         SealCtx {
             slots,
             events,
             locals: BTreeMap::new(),
+            constants,
+            enum_values,
+            structs,
+            local_structs: BTreeMap::new(),
+            external_fns,
             uses: Uses::default(),
             errors: Vec::new(),
             ret_kinds: Vec::new(),
         }
+    }
+
+    /// The Rust local name backing struct local `var`'s `field`.
+    fn struct_local(var: &str, field: &str) -> String {
+        format!("__s_{var}_{field}")
     }
 
     fn slot_of(&self, name: &str) -> Option<&Slot> {
@@ -154,6 +195,14 @@ impl<'a> SealCtx<'a> {
 
             // Storage scalar read or local variable.
             Expression::Variable(id) => {
+                // Compile-time inlined `constant`.
+                if let Some((lit, vt)) = self.constants.get(&id.name) {
+                    return (lit.clone(), *vt);
+                }
+                // Bare enum value name (e.g. an enum used without qualifier).
+                if let Some(ord) = self.enum_values.get(&id.name) {
+                    return (format!("{ord}u128"), ValTy::Num);
+                }
                 if let Some(slot) = self.slot_of(&id.name) {
                     if let SlotKind::Scalar(vt) = slot.kind {
                         // Signed scalars are stored as u128 bit patterns.
@@ -286,6 +335,18 @@ impl<'a> SealCtx<'a> {
                         }
                     }
                 }
+                // `localStruct.field` read.
+                if let Expression::Variable(id) = base.as_ref() {
+                    if let Some((v, t)) = self.local_struct_field_read(&id.name, &member.name) {
+                        return (v, t);
+                    }
+                }
+                // `EnumName.Value` -> the variant's u8 ordinal.
+                if let Expression::Variable(_) = base.as_ref() {
+                    if let Some(ord) = self.enum_values.get(&member.name) {
+                        return (format!("{ord}u128"), ValTy::Num);
+                    }
+                }
                 // `m[k].field` struct-field read.
                 if let Some((read, vt)) = self.struct_field_read(base, &member.name) {
                     return (read, vt);
@@ -295,6 +356,10 @@ impl<'a> SealCtx<'a> {
 
             // `address(x)` / `payable(x)` casts: pass through the inner value.
             Expression::FunctionCall(_, callee, args) => {
+                // Cross-contract call `IFoo(addr).bar(args)` in value position.
+                if let Some((expr, vt)) = self.cross_call(callee, args) {
+                    return (expr, vt);
+                }
                 if let Expression::Type(_, PtType::Payable) = callee.as_ref() {
                     if let Some(a) = args.first() {
                         return self.expr_ty(a);
@@ -308,6 +373,20 @@ impl<'a> SealCtx<'a> {
                             return ("[0u8; 32]".to_string(), ValTy::Addr);
                         }
                         return self.expr_ty(a);
+                    }
+                }
+                // `uintN(x)` / `intN(x)` where solang renders the callee as a
+                // `Type` node rather than a `Variable`.
+                if let Expression::Type(_, PtType::Uint(_)) = callee.as_ref() {
+                    if let Some(a) = args.first() {
+                        let (s, t) = self.expr_ty(a);
+                        return (coerce_num(&s, t, ValTy::Num), ValTy::Num);
+                    }
+                }
+                if let Expression::Type(_, PtType::Int(_)) = callee.as_ref() {
+                    if let Some(a) = args.first() {
+                        let (s, t) = self.expr_ty(a);
+                        return (coerce_num(&s, t, ValTy::SNum), ValTy::SNum);
                     }
                 }
                 if let Expression::Variable(id) = callee.as_ref() {
@@ -483,6 +562,183 @@ impl<'a> SealCtx<'a> {
         None
     }
 
+    /// If `ty` names a known struct, return its name.
+    fn struct_type_name(&self, ty: &Expression) -> Option<String> {
+        if let Expression::Variable(id) = ty {
+            if self.structs.contains_key(&id.name) {
+                return Some(id.name.clone());
+            }
+        }
+        None
+    }
+
+    /// Read `local.field` for a struct local. Returns the backing local + kind.
+    fn local_struct_field_read(&self, var: &str, field: &str) -> Option<(String, ValTy)> {
+        let sname = self.local_structs.get(var)?;
+        let fields = self.structs.get(sname)?;
+        let (_, fkind) = fields.iter().find(|(n, _)| n == field)?;
+        Some((SealCtx::struct_local(var, field), *fkind))
+    }
+
+    /// Declare a struct local from `Point(a, b)` (or another struct local),
+    /// binding each field to a backing scalar local `__s_<var>_<field>`.
+    fn decl_struct_local(
+        &mut self,
+        name: &str,
+        sname: &str,
+        init: Option<&Expression>,
+    ) -> Vec<String> {
+        let fields = match self.structs.get(sname) {
+            Some(f) => f.clone(),
+            None => return vec![format!("// {}", self.err("unknown struct type"))],
+        };
+        self.local_structs.insert(name.to_string(), sname.to_string());
+        let mut out = Vec::new();
+        match init {
+            // `Point(a, b)` positional constructor.
+            Some(Expression::FunctionCall(_, callee, args)) if Self::is_struct_ctor(callee, sname) => {
+                if args.len() != fields.len() {
+                    return vec![format!(
+                        "// {}",
+                        self.err("struct constructor arity mismatch")
+                    )];
+                }
+                for (i, (fname, fkind)) in fields.iter().enumerate() {
+                    let (v, t) = self.expr_ty(&args[i]);
+                    let v = match fkind {
+                        ValTy::Num | ValTy::SNum => coerce_num(&v, t, *fkind),
+                        _ => v,
+                    };
+                    out.push(format!("let mut {} = {v};", SealCtx::struct_local(name, fname)));
+                }
+            }
+            // `Point memory q = p;` copy from another struct local.
+            Some(Expression::Variable(id)) if self.local_structs.contains_key(&id.name) => {
+                let src = id.name.clone();
+                for (fname, _) in &fields {
+                    out.push(format!(
+                        "let mut {} = {};",
+                        SealCtx::struct_local(name, fname),
+                        SealCtx::struct_local(&src, fname)
+                    ));
+                }
+            }
+            None => {
+                // Zero-initialized struct local.
+                for (fname, fkind) in &fields {
+                    let zero = match fkind {
+                        ValTy::Bool => "false",
+                        ValTy::Addr => "[0u8; 32]",
+                        ValTy::SNum => "0i128",
+                        _ => "0u128",
+                    };
+                    out.push(format!("let mut {} = {zero};", SealCtx::struct_local(name, fname)));
+                }
+            }
+            _ => {
+                out.push(format!("// {}", self.err("unsupported struct local initializer")));
+            }
+        }
+        out
+    }
+
+    /// Is `callee` a constructor call for struct `sname`?
+    fn is_struct_ctor(callee: &Expression, sname: &str) -> bool {
+        matches!(callee, Expression::Variable(id) if id.name == sname)
+    }
+
+    /// Recognize a cross-contract call `IFoo(addr).method(args)`. `outer_callee`
+    /// is the `MemberAccess(FunctionCall(Variable(IFoo), [addr]), method)` node;
+    /// `args` are the method arguments. Returns the rendered expression (an
+    /// inline block performing `seal_call` and decoding the return) + its kind.
+    fn cross_call(
+        &mut self,
+        outer_callee: &Expression,
+        args: &[Expression],
+    ) -> Option<(String, ValTy)> {
+        let (base, method) = match outer_callee {
+            Expression::MemberAccess(_, base, member) => (base.as_ref(), member.name.clone()),
+            _ => return None,
+        };
+        // base must be `IFoo(addr)` — a cast of an address through an interface.
+        let addr_expr = match base {
+            Expression::FunctionCall(_, callee, cargs) => match callee.as_ref() {
+                Expression::Variable(_) if cargs.len() == 1 => &cargs[0],
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let sig = self.external_fns.get(&method)?.clone();
+        // Encode the address operand.
+        let (addr_s, _) = self.expr_ty(addr_expr);
+        // Build the call-input prelude: 4-byte selector ++ SCALE(args).
+        let mut input_len = 4usize;
+        let mut writes: Vec<String> = Vec::new();
+        let s = sig.selector;
+        writes.push(format!(
+            "__ci[0]={}u8; __ci[1]={}u8; __ci[2]={}u8; __ci[3]={}u8;",
+            s[0], s[1], s[2], s[3]
+        ));
+        for (i, a) in args.iter().enumerate() {
+            let want = sig.args.get(i).copied().unwrap_or(ValTy::Num);
+            let (av, at) = self.expr_ty(a);
+            match want {
+                ValTy::Addr => {
+                    writes.push(format!(
+                        "{{ let __a: [u8;32] = {av}; let mut __k=0usize; while __k<32 {{ __ci[{input_len}+__k]=__a[__k]; __k+=1; }} }}"
+                    ));
+                    input_len += 32;
+                }
+                ValTy::Bool => {
+                    writes.push(format!("__ci[{input_len}] = ({av}) as u8;"));
+                    input_len += 1;
+                }
+                _ => {
+                    let v = coerce_num(&av, at, ValTy::Num);
+                    writes.push(format!(
+                        "{{ let __le = ({v}).to_le_bytes(); let mut __k=0usize; while __k<16 {{ __ci[{input_len}+__k]=__le[__k]; __k+=1; }} }}"
+                    ));
+                    input_len += 16;
+                }
+            }
+        }
+        self.uses.call = true;
+        // Output decode.
+        let (decode, vt) = match sig.ret {
+            Some(ValTy::Addr) => (
+                "{ let mut __o=[0u8;32]; let __n=do_call(&__dest,&__ci[..__cil],__o.as_mut_ptr(),32); let _=__n; __o }".to_string(),
+                ValTy::Addr,
+            ),
+            Some(ValTy::Bool) => (
+                "{ let mut __o=[0u8;1]; do_call(&__dest,&__ci[..__cil],__o.as_mut_ptr(),1); __o[0]!=0 }".to_string(),
+                ValTy::Bool,
+            ),
+            Some(_) => (
+                "{ let mut __o=[0u8;16]; do_call(&__dest,&__ci[..__cil],__o.as_mut_ptr(),16); u128::from_le_bytes(__o) }".to_string(),
+                ValTy::Num,
+            ),
+            None => (
+                "{ let mut __o=[0u8;1]; do_call(&__dest,&__ci[..__cil],__o.as_mut_ptr(),0); }".to_string(),
+                ValTy::Num,
+            ),
+        };
+        // Assemble the full inline block.
+        let mut block = String::from("{ ");
+        block.push_str(&format!("let __dest: [u8;32] = {addr_s}; "));
+        block.push_str(&format!(
+            "let mut __ci_u = MaybeUninit::<[u8; {}]>::uninit(); let __ci = unsafe {{ &mut *__ci_u.as_mut_ptr() }}; ",
+            input_len.max(4)
+        ));
+        for w in &writes {
+            block.push_str(w);
+            block.push(' ');
+        }
+        block.push_str(&format!("let __cil = {input_len}usize; "));
+        block.push_str(&decode);
+        block.push_str(" }");
+        Some((block, vt))
+    }
+
     /// Render a `m[k].field` read.
     fn struct_field_read(&mut self, base: &Expression, field: &str) -> Option<(String, ValTy)> {
         let (key_call, fkind) = self.struct_field_key(base, field)?;
@@ -648,6 +904,10 @@ impl<'a> SealCtx<'a> {
             // Local variable declaration `T name = expr;`.
             Statement::VariableDefinition(_, decl, init) => {
                 let name = decl.name.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+                // Struct local: `Point memory p = Point(a, b);`.
+                if let Some(sname) = self.struct_type_name(&decl.ty) {
+                    return self.decl_struct_local(&name, &sname, init.as_ref());
+                }
                 // Locals are `mut` (loop counters / reassigned vars); the crate
                 // sets `#![allow(unused_mut)]`.
                 if let Some(rhs) = init {
@@ -737,6 +997,20 @@ impl<'a> SealCtx<'a> {
     /// Write `value` (of kind `vt`) back to an lvalue (storage scalar, mapping
     /// element, or local).
     fn write_back(&mut self, lhs: &Expression, value: &str, vt: ValTy) -> Vec<String> {
+        // `localStruct.field = value` write to a struct local.
+        if let Expression::MemberAccess(_, base, member) = lhs {
+            if let Expression::Variable(id) = base.as_ref() {
+                if let Some((target, fkind)) =
+                    self.local_struct_field_read(&id.name, &member.name)
+                {
+                    let coerced = match fkind {
+                        ValTy::Num | ValTy::SNum => coerce_num(value, vt, fkind),
+                        _ => value.to_string(),
+                    };
+                    return vec![format!("{target} = {coerced};")];
+                }
+            }
+        }
         // `m[k].field = value` struct-field write.
         if let Expression::MemberAccess(_, base, member) = lhs {
             if let Some((key_call, fkind)) = self.struct_field_key(base, &member.name) {
@@ -823,10 +1097,15 @@ impl<'a> SealCtx<'a> {
             }
         }
         let (value, vt) = self.expr_ty(rhs);
-        // Struct-field write `m[k].field = v`.
+        // Struct-field write `m[k].field = v` or `localStruct.field = v`.
         if let Expression::MemberAccess(_, base, member) = lhs {
             if self.struct_field_key(base, &member.name).is_some() {
                 return self.write_back(lhs, &value, vt);
+            }
+            if let Expression::Variable(id) = base.as_ref() {
+                if self.local_struct_field_read(&id.name, &member.name).is_some() {
+                    return self.write_back(lhs, &value, vt);
+                }
             }
         }
         // Array-element or mapping write `a[i] = v` / `m[k] = v`.
@@ -862,6 +1141,10 @@ impl<'a> SealCtx<'a> {
 
     /// A bare call statement: `require(...)`, `revert()`, `addr.transfer(x)`.
     fn call_stmt(&mut self, callee: &Expression, args: &[Expression]) -> Vec<String> {
+        // Cross-contract call as a statement: `IFoo(addr).bar(args);`.
+        if let Some((expr, _)) = self.cross_call(callee, args) {
+            return vec![format!("let _ = {expr};")];
+        }
         // arr.push(x) on a dynamic-array storage var.
         if let Expression::MemberAccess(_, base, member) = callee {
             if member.name == "push" {
@@ -952,13 +1235,14 @@ impl<'a> SealCtx<'a> {
                 ));
                 lines.push("let __topics = unsafe { &mut *__topics_u.as_mut_ptr() };".to_string());
                 lines.push(format!("__topics[0] = {};", (n_topics as u32) << 2));
-                // first topic = event signature hash (blake2 of name bytes)
-                self.uses.blake2 = true;
-                let sig = event_sig_string(&ev);
-                lines.push(format!(
-                    "{{ let __sig = b\"{sig}\"; unsafe {{ seal_hash_blake2_256(__sig.as_ptr(), {} , __topics.as_mut_ptr().add(1)); }} }}",
-                    sig.len()
-                ));
+                // first topic = keccak256(canonical event signature), the real
+                // ABI event topic, precomputed at translate time and written as
+                // a byte literal (no in-wasm keccak needed; the node ignores
+                // topics but this keeps the emitted payload ABI-faithful).
+                let topic = keccak256(event_sig_string(&ev).as_bytes());
+                for (j, b) in topic.iter().enumerate() {
+                    lines.push(format!("__topics[1 + {j}] = {b}u8;"));
+                }
                 let mut off = 1 + 32;
                 for (var, vt) in &indexed {
                     match vt {
@@ -1131,18 +1415,58 @@ fn is_address_cast(e: &Expression) -> bool {
     }
 }
 
+/// Canonical Solidity ABI type for a parameter/field/return type. Used to build
+/// the function-signature and event-signature strings that are keccak-hashed for
+/// 4-byte selectors / event topics (ABI compatibility).
+fn abi_ty(t: &Type) -> &'static str {
+    match t {
+        Type::Bool => "bool",
+        Type::AccountId => "address",
+        Type::I128 => "int256",
+        Type::String => "string",
+        Type::Bytes => "bytes",
+        // uintN (incl. enums lowered to numeric) canonicalize to uint256, the
+        // Solidity default width for the contracts in scope.
+        _ => "uint256",
+    }
+}
+
+/// Canonical function signature string `name(t1,t2,...)`.
+fn fn_sig_string(name: &str, params: &[crate::ir::Param]) -> String {
+    let parts: Vec<&str> = params.iter().map(|p| abi_ty(&p.ty)).collect();
+    format!("{}({})", name, parts.join(","))
+}
+
+/// keccak256 of `s`.
+fn keccak256(s: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Keccak};
+    let mut k = Keccak::v256();
+    let mut out = [0u8; 32];
+    k.update(s);
+    k.finalize(&mut out);
+    out
+}
+
+/// The 4-byte function selector = first 4 bytes of keccak256(canonical sig).
+fn selector4(name: &str, params: &[crate::ir::Param]) -> [u8; 4] {
+    let h = keccak256(fn_sig_string(name, params).as_bytes());
+    [h[0], h[1], h[2], h[3]]
+}
+
 /// Canonical event signature string `Name(t1,t2,...)`.
 fn event_sig_string(ev: &crate::ir::Event) -> String {
-    let parts: Vec<&str> = ev
-        .fields
-        .iter()
-        .map(|f| match f.ty {
-            Type::AccountId => "address",
-            Type::Bool => "bool",
-            _ => "uint256",
-        })
-        .collect();
+    let parts: Vec<&str> = ev.fields.iter().map(|f| abi_ty(&f.ty)).collect();
     format!("{}({})", ev.name, parts.join(","))
+}
+
+/// keccak256 of the canonical event signature (the ABI event topic).
+fn event_topic_hex(ev: &crate::ir::Event) -> String {
+    let h = keccak256(event_sig_string(ev).as_bytes());
+    let mut s = String::from("0x");
+    for b in h.iter() {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// Convert a contract name to a snake_case crate name.
@@ -1290,6 +1614,126 @@ fn collect_structs(
     out
 }
 
+/// Collect enum definitions: every enum *value* name -> its u8 ordinal. Enums
+/// lower to `uint8` (a numeric kind). Solidity forbids reusing a value name, so
+/// a flat name->ordinal map is unambiguous within a contract.
+fn collect_enum_values(def: &ContractDefinition) -> BTreeMap<String, u8> {
+    let mut out = BTreeMap::new();
+    for part in &def.parts {
+        if let ContractPart::EnumDefinition(ed) = part {
+            for (i, v) in ed.values.iter().enumerate() {
+                if let Some(id) = v {
+                    out.insert(id.name.clone(), i as u8);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The set of enum type names declared in the contract (used to resolve an
+/// enum-typed storage var / param to a numeric kind).
+fn collect_enum_types(def: &ContractDefinition) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for part in &def.parts {
+        if let ContractPart::EnumDefinition(ed) = part {
+            if let Some(id) = &ed.name {
+                out.insert(id.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Render a `constant` initializer expression to a Rust literal of the given
+/// kind. Only compile-time-evaluable literals are accepted; anything else is a
+/// hard error (returned as `Err`) so the constant is never silently lost.
+fn const_literal(init: &Expression, vt: ValTy) -> Result<String, String> {
+    match init {
+        Expression::NumberLiteral(_, v, _, _) => match vt {
+            ValTy::SNum => Ok(format!("{v}i128")),
+            _ => Ok(format!("{v}u128")),
+        },
+        Expression::HexNumberLiteral(_, v, _) => Ok(format!("{v}u128")),
+        Expression::BoolLiteral(_, b) => Ok((if *b { "true" } else { "false" }).to_string()),
+        Expression::Negate(_, inner) => {
+            let inner = const_literal(inner, ValTy::SNum)?;
+            Ok(format!("(-({inner}))"))
+        }
+        // Simple constant arithmetic (e.g. `10 ** 18` is common). Only handle
+        // the forms we can fold to a literal; otherwise fail loud.
+        Expression::Power(_, b, e) => {
+            if let (Expression::NumberLiteral(_, bs, _, _), Expression::NumberLiteral(_, es, _, _)) =
+                (b.as_ref(), e.as_ref())
+            {
+                let base: u128 = bs.parse().map_err(|_| "constant power base too large".to_string())?;
+                let exp: u32 = es.parse().map_err(|_| "constant power exponent too large".to_string())?;
+                let val = base
+                    .checked_pow(exp)
+                    .ok_or_else(|| "constant power overflows u128".to_string())?;
+                Ok(format!("{val}u128"))
+            } else {
+                Err("constant initializer must be a compile-time literal".into())
+            }
+        }
+        _ => Err("constant initializer must be a compile-time literal".into()),
+    }
+}
+
+/// Collect `constant` variables for compile-time inlining. Returns a map
+/// name -> (rust literal, kind). `immutable` variables are NOT inlined (they
+/// are written by the constructor and stay as real storage slots).
+///
+/// FAIL-LOUD: a `constant` with a non-literal initializer is an error.
+fn collect_constants(
+    def: &ContractDefinition,
+    enum_types: &std::collections::BTreeSet<String>,
+    uint_strategy: &str,
+) -> Result<BTreeMap<String, (String, ValTy)>, String> {
+    let mut out = BTreeMap::new();
+    for part in &def.parts {
+        if let ContractPart::VariableDefinition(v) = part {
+            let is_const = v
+                .attrs
+                .iter()
+                .any(|a| matches!(a, solang_parser::pt::VariableAttribute::Constant(_)));
+            if !is_const {
+                continue;
+            }
+            let name = match &v.name {
+                Some(id) => id.name.clone(),
+                None => continue,
+            };
+            // Resolve the declared kind (enum -> numeric).
+            let vt = resolve_kind(&v.ty, enum_types, uint_strategy);
+            let init = v.initializer.as_ref().ok_or_else(|| {
+                format!("constant `{name}` has no initializer")
+            })?;
+            let lit = const_literal(init, vt)
+                .map_err(|e| format!("constant `{name}`: {e}"))?;
+            out.insert(name, (lit, vt));
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a type expression to a `ValTy`, mapping enum types to numeric.
+fn resolve_kind(
+    ty: &Expression,
+    enum_types: &std::collections::BTreeSet<String>,
+    uint_strategy: &str,
+) -> ValTy {
+    if let Expression::Variable(id) = ty {
+        if enum_types.contains(&id.name) {
+            return ValTy::Num;
+        }
+    }
+    match crate::lower::map_type_structs(ty, uint_strategy) {
+        Some(t) => ValTy::from_type(&t),
+        None => ValTy::Num,
+    }
+}
+
 /// Is this statement the modifier placeholder `_;`?
 fn is_placeholder(s: &Statement) -> bool {
     matches!(
@@ -1316,15 +1760,28 @@ pub fn emit_seal(
     c: &Contract,
     def: &ContractDefinition,
     uint_strategy: &str,
+    external_fns: &BTreeMap<String, ExternalFn>,
 ) -> Result<SealArtifacts, String> {
     let _ = uint_strategy;
 
     // Resolve struct definitions (name -> ordered scalar fields).
     let structs = collect_structs(def, uint_strategy);
+    let enum_values = collect_enum_values(def);
+    let enum_types = collect_enum_types(def);
+    // Compile-time inlined constants (excluded from storage slots).
+    let constants = collect_constants(def, &enum_types, uint_strategy)?;
+
+    // Storage fields, excluding `constant` vars (inlined) — they must not take
+    // a slot or their initializer value would be silently lost.
+    let storage: Vec<&crate::ir::Field> = c
+        .storage
+        .iter()
+        .filter(|f| !constants.contains_key(&f.name))
+        .collect();
 
     // Assign slots, validating supported storage shapes.
     let mut slots: Vec<Slot> = Vec::new();
-    for (i, f) in c.storage.iter().enumerate() {
+    for (i, f) in storage.iter().enumerate() {
         let kind = match &f.ty {
             Type::Bool => SlotKind::Scalar(ValTy::Bool),
             Type::U128 => SlotKind::Scalar(ValTy::Num),
@@ -1380,6 +1837,8 @@ pub fn emit_seal(
                     ))
                 }
             },
+            // An enum-typed storage var lowers to a numeric (uint8) scalar slot.
+            Type::Struct(sname) if enum_types.contains(sname) => SlotKind::Scalar(ValTy::Num),
             other => {
                 return Err(format!("field `{}`: unsupported storage type {other:?}", f.name))
             }
@@ -1422,7 +1881,7 @@ pub fn emit_seal(
     // ----- Constructor body -----
     let ctor_body_lines: Vec<String> = if let Some(ctor) = &c.constructor {
         let fdef = find_function(def, true, "");
-        let mut ctx = SealCtx::new(&slots, &c.events);
+        let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
         register_params(&mut ctx, &ctor.params);
         let mut lines = decode_params_prelude(&ctor.params, false);
         if let Some(fdef) = fdef {
@@ -1439,20 +1898,79 @@ pub fn emit_seal(
         Vec::new()
     };
 
+    // ----- receive() / fallback() -----
+    // Solidity dispatch for the `call()` default (no selector match):
+    //   * empty calldata + `receive` defined  -> run receive()
+    //   * otherwise                            -> run fallback() if defined
+    // Both bodies are lowered here; if neither exists the default reverts (as
+    // before). A bodyless receive/fallback declaration is ignored.
+    let mut receive_body: Option<Vec<String>> = None;
+    let mut fallback_body: Option<Vec<String>> = None;
+    for part in &def.parts {
+        if let ContractPart::FunctionDefinition(f) = part {
+            let kind = match f.ty {
+                FunctionTy::Receive => Some(false),
+                FunctionTy::Fallback => Some(true),
+                _ => None,
+            };
+            if let Some(is_fallback) = kind {
+                if let Some(body) = &f.body {
+                    let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
+                    let mut lines: Vec<String> = Vec::new();
+                    for mname in function_modifiers(f) {
+                        if let Some(guards) = modifiers.get(&mname) {
+                            for g in guards {
+                                lines.extend(ctx.stmt(g));
+                            }
+                        }
+                    }
+                    lines.extend(ctx.stmt(body));
+                    lines.push("ret(&[]);".to_string());
+                    merge_uses(&mut uses, ctx.uses);
+                    all_errors.extend(ctx.errors);
+                    if is_fallback {
+                        fallback_body = Some(lines);
+                    } else {
+                        receive_body = Some(lines);
+                    }
+                }
+            }
+        }
+    }
+
     // ----- Messages -----
     let mut arms: Vec<String> = Vec::new();
     let mut meta_messages: Vec<String> = Vec::new();
 
-    for (i, msg) in c.messages.iter().enumerate() {
-        let selector = (i + 1) as u32;
-        let sel_bytes = selector.to_be_bytes();
+    // Real keccak-256 4-byte selectors (ABI-compatible). Detect any collision
+    // (e.g. genuine 4-byte clash or duplicate signature) and fail loud rather
+    // than silently dispatching the wrong function.
+    let mut seen_selectors: BTreeMap<[u8; 4], String> = BTreeMap::new();
+    for msg in &c.messages {
+        let sel = selector4(&msg.name, &msg.params);
+        if let Some(prev) = seen_selectors.get(&sel) {
+            if prev != &msg.name {
+                return Err(format!(
+                    "selector collision: `{}` and `{}` hash to the same 4-byte selector \
+                     0x{:02x}{:02x}{:02x}{:02x}",
+                    prev, msg.name, sel[0], sel[1], sel[2], sel[3]
+                ));
+            }
+        }
+        seen_selectors.insert(sel, msg.name.clone());
+    }
+
+    for (_i, msg) in c.messages.iter().enumerate() {
+        let sel_bytes = selector4(&msg.name, &msg.params);
+        let selector =
+            u32::from_be_bytes(sel_bytes);
         let pat = format!(
             "[{}, {}, {}, {}]",
             sel_bytes[0], sel_bytes[1], sel_bytes[2], sel_bytes[3]
         );
 
         let fdef = find_function(def, false, &msg.name);
-        let mut ctx = SealCtx::new(&slots, &c.events);
+        let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
         register_params(&mut ctx, &msg.params);
         ctx.ret_kinds = msg.returns.iter().map(ValTy::from_type).collect();
 
@@ -1476,6 +1994,12 @@ pub fn emit_seal(
             && single_ret
             && slots.iter().any(|s| s.name == msg.name && matches!(s.kind, SlotKind::Scalar(_)));
 
+        // Auto-getter for a `public constant`: return the inlined literal.
+        let const_getter = fdef.is_none()
+            && msg.params.is_empty()
+            && single_ret
+            && constants.contains_key(&msg.name);
+
         if is_auto_getter {
             let slot = slots.iter().find(|s| s.name == msg.name).unwrap();
             if let SlotKind::Scalar(vt) = slot.kind {
@@ -1489,6 +2013,13 @@ pub fn emit_seal(
                     body_lines.push(format!("__ret = Some({read});"));
                 }
             }
+        } else if const_getter {
+            let (lit, vt) = constants.get(&msg.name).unwrap();
+            let read = match vt {
+                ValTy::SNum => format!("({lit} as i128)"),
+                _ => lit.clone(),
+            };
+            body_lines.push(format!("__ret = Some({read});"));
         } else if let Some(fdef) = fdef {
             // Inline modifier guards (e.g. onlyOwner) at function entry.
             for mname in function_modifiers(fdef) {
@@ -1624,7 +2155,36 @@ pub fn emit_seal(
         .unwrap_or(0);
     let call_buf = 4 + max_msg_args.max(1);
 
-    let lib_rs = render_lib_rs(&slots, &ctor_body_lines, &arms, uses, deploy_buf, call_buf);
+    // Build the `call()` default-match arm from receive/fallback bodies.
+    let default_arm: String = {
+        let mut s = String::new();
+        match (&receive_body, &fallback_body) {
+            (None, None) => {
+                s.push_str("        _ => { revert(); }\n");
+            }
+            (recv, fb) => {
+                s.push_str("        _ => {\n");
+                if let Some(lines) = recv {
+                    s.push_str("            if in_len == 0 {\n");
+                    for l in lines {
+                        s.push_str(&format!("                {l}\n"));
+                    }
+                    s.push_str("            }\n");
+                }
+                if let Some(lines) = fb {
+                    for l in lines {
+                        s.push_str(&format!("            {l}\n"));
+                    }
+                } else {
+                    s.push_str("            revert();\n");
+                }
+                s.push_str("        }\n");
+            }
+        }
+        s
+    };
+
+    let lib_rs = render_lib_rs(&slots, &ctor_body_lines, &arms, uses, deploy_buf, call_buf, &default_arm);
 
     // ----- metadata.json (incl. events layout) -----
     let ctor_args_meta: Vec<String> = c
@@ -1650,9 +2210,10 @@ pub fn emit_seal(
                 })
                 .collect();
             format!(
-                "    {{ \"name\": \"{}\", \"sig\": \"{}\", \"fields\": [{}] }}",
+                "    {{ \"name\": \"{}\", \"sig\": \"{}\", \"topic\": \"{}\", \"fields\": [{}] }}",
                 ev.name,
                 event_sig_string(ev),
+                event_topic_hex(ev),
                 fields.join(", ")
             )
         })
@@ -1708,6 +2269,7 @@ fn merge_uses(acc: &mut Uses, u: Uses) {
     acc.now |= u.now;
     acc.block_number |= u.block_number;
     acc.balance |= u.balance;
+    acc.call |= u.call;
 }
 
 /// Prelude that decodes parameters from the input buffer.
@@ -1914,6 +2476,7 @@ fn render_lib_rs(
     uses: Uses,
     deploy_buf: usize,
     call_buf: usize,
+    default_arm: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str("#![no_std]\n#![no_main]\n#![allow(dead_code, non_snake_case, unused_mut, unused_assignments)]\nuse core::panic::PanicInfo;\nuse core::mem::MaybeUninit;\n\n");
@@ -1954,6 +2517,9 @@ fn render_lib_rs(
     if uses.balance {
         out.push_str("    fn seal_balance(out: *mut u8, out_len: *mut u32);\n");
     }
+    if uses.call {
+        out.push_str("    fn seal_call(callee: *const u8, callee_len: u32, gas: u64, value: *const u8, value_len: u32, input: *const u8, input_len: u32, output: *mut u8, output_len: *mut u32) -> u32;\n");
+    }
     out.push_str("}\n\n");
 
     // Runtime helpers.
@@ -1978,6 +2544,11 @@ fn render_lib_rs(
     }
     if uses.balance {
         out.push_str("fn self_balance() -> u128 { let mut buf = [0u8; 16]; let mut len: u32 = 16; unsafe { seal_balance(buf.as_mut_ptr(), &mut len as *mut u32); } u128::from_le_bytes(buf) }\n");
+    }
+    if uses.call {
+        // Cross-contract call: selector++SCALE(args) already in `input`. Forwards
+        // zero value. Reverts on callee trap. Writes up to `out_cap` return bytes.
+        out.push_str("fn do_call(dest: &[u8; 32], input: &[u8], out: *mut u8, out_cap: u32) -> u32 { let val = [0u8; 16]; let mut out_len: u32 = out_cap; let rc = unsafe { seal_call(dest.as_ptr(), 32, 0u64, val.as_ptr(), 16, input.as_ptr(), input.len() as u32, out, &mut out_len as *mut u32) }; if rc != 0 { revert(); } out_len }\n");
     }
     out.push('\n');
 
@@ -2024,7 +2595,7 @@ fn render_lib_rs(
     for arm in arms {
         out.push_str(arm);
     }
-    out.push_str("        _ => { revert(); }\n");
+    out.push_str(default_arm);
     out.push_str("    }\n");
     out.push_str("}\n");
 
@@ -2118,7 +2689,58 @@ pub fn translate_seal(src: &str) -> Result<SealArtifacts, String> {
     let errors = crate::lower::lower_errors(&def);
     let (constructor, messages) = crate::lower::lower_functions(&def, uint_strategy);
     let contract = Contract { name, storage, events, errors, constructor, messages };
-    emit_seal(&contract, &def, uint_strategy)
+    // External call targets: every function declared on any contract/interface
+    // in the file (incl. bodyless interface decls), keyed by name.
+    let external_fns = collect_external_fns(src, uint_strategy);
+    emit_seal(&contract, &def, uint_strategy, &external_fns)
+}
+
+/// Collect external function signatures from all contracts/interfaces in the
+/// source, for cross-contract `IFoo(addr).bar(..)` calls. Keyed by function
+/// name (last writer wins; overloads by name are not distinguished here).
+fn collect_external_fns(src: &str, uint_strategy: &str) -> BTreeMap<String, ExternalFn> {
+    let mut out = BTreeMap::new();
+    let all = match crate::parse::parse_all(src) {
+        Ok(a) => a,
+        Err(_) => return out,
+    };
+    for c in &all {
+        for part in &c.parts {
+            if let ContractPart::FunctionDefinition(f) = part {
+                if !matches!(f.ty, FunctionTy::Function) {
+                    continue;
+                }
+                let name = match &f.name {
+                    Some(id) => id.name.clone(),
+                    None => continue,
+                };
+                let params: Vec<crate::ir::Param> = f
+                    .params
+                    .iter()
+                    .filter_map(|(_, p)| p.as_ref())
+                    .filter_map(|p| {
+                        crate::lower::map_type_structs(&p.ty, uint_strategy).map(|ty| {
+                            crate::ir::Param {
+                                name: p.name.as_ref().map(|i| i.name.clone()).unwrap_or_default(),
+                                ty,
+                            }
+                        })
+                    })
+                    .collect();
+                let arg_kinds: Vec<ValTy> = params.iter().map(|p| ValTy::from_type(&p.ty)).collect();
+                let ret = f
+                    .returns
+                    .iter()
+                    .filter_map(|(_, p)| p.as_ref())
+                    .filter_map(|p| crate::lower::map_type_structs(&p.ty, uint_strategy))
+                    .map(|t| ValTy::from_type(&t))
+                    .next();
+                let selector = selector4(&name, &params);
+                out.insert(name, ExternalFn { selector, args: arg_kinds, ret });
+            }
+        }
+    }
+    out
 }
 
 // keep map_type referenced so future non-scalar detection compiles.
@@ -2144,10 +2766,12 @@ mod tests {
         assert!(art.lib_rs.contains("pub extern \"C\" fn call()"));
         assert!(art.lib_rs.contains("store_slot_0"));
         assert!(art.lib_rs.contains("fn load_slot_0() -> bool"));
-        assert!(art.lib_rs.contains("[0, 0, 0, 1]"));
-        assert!(art.lib_rs.contains("[0, 0, 0, 2]"));
+        // Real keccak-256 4-byte selectors: flip()=0xcde4efa9, get()=0x6d4ce63c.
+        assert!(art.lib_rs.contains("[205, 228, 239, 169]"));
+        assert!(art.lib_rs.contains("[109, 76, 230, 60]"));
         assert!(art.lib_rs.contains("input[0] != 0"));
-        assert!(art.metadata_json.contains("\"selector\": \"0x00000001\""));
+        assert!(art.metadata_json.contains("\"selector\": \"0xcde4efa9\""));
+        assert!(art.metadata_json.contains("\"selector\": \"0x6d4ce63c\""));
         assert!(art.metadata_json.contains("\"name\": \"get\""));
     }
 
@@ -2579,5 +3203,134 @@ mod tests {
         "#;
         let art = translate_seal(src).expect("translate");
         assert!(art.lib_rs.contains("if !((v > 0u128)) { revert(); }"));
+    }
+
+    // ---- Round 4, Wave C ----
+
+    #[test]
+    fn keccak_selectors_match_known_abi() {
+        // get() and flip() have well-known 4-byte selectors.
+        let src = r#"contract F { bool v; function flip() public { v = !v; }
+            function get() public view returns (bool) { return v; } }"#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.metadata_json.contains("\"selector\": \"0xcde4efa9\""), "flip selector");
+        assert!(art.metadata_json.contains("\"selector\": \"0x6d4ce63c\""), "get selector");
+    }
+
+    #[test]
+    fn event_topic_is_keccak_in_metadata() {
+        let src = r#"contract T { mapping(address=>uint256) b;
+            event Transfer(address indexed from, address indexed to, uint256 value);
+            function f(address to, uint256 v) public { b[to]=v; emit Transfer(msg.sender,to,v); } }"#;
+        let art = translate_seal(src).expect("translate");
+        // keccak256("Transfer(address,address,uint256)") well-known topic.
+        assert!(art.metadata_json.contains(
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        ), "ERC20 Transfer topic");
+    }
+
+    #[test]
+    fn fail_loud_on_multiple_contracts() {
+        let src = "contract A { uint256 x; } contract B { uint256 y; }";
+        let err = translate_seal(src).unwrap_err();
+        assert!(err.contains("multiple deployable contracts"), "got: {err}");
+    }
+
+    #[test]
+    fn fail_loud_on_missing_base() {
+        let src = "contract C is Missing { uint256 x; }";
+        let err = translate_seal(src).unwrap_err();
+        assert!(err.contains("not defined in this file"), "got: {err}");
+    }
+
+    #[test]
+    fn constant_is_inlined_not_a_slot() {
+        let src = r#"contract C { uint256 constant CAP = 1000; uint256 total;
+            function setTotal(uint256 n) public { require(n <= CAP); total = n; }
+            function get() public view returns (uint256) { return total; } }"#;
+        let art = translate_seal(src).expect("translate");
+        // CAP inlined; `total` is slot 0 (CAP took no slot).
+        assert!(art.lib_rs.contains("n <= 1000u128"));
+        assert!(art.lib_rs.contains("fn load_slot_0() -> u128"));
+        assert!(!art.lib_rs.contains("load_slot_1"), "CAP must not take a slot");
+    }
+
+    #[test]
+    fn fail_loud_on_non_literal_constant() {
+        let src = r#"contract C { uint256 constant X = block.timestamp;
+            function f() public view returns (uint256) { return X; } }"#;
+        let err = translate_seal(src).unwrap_err();
+        assert!(err.contains("compile-time literal"), "got: {err}");
+    }
+
+    #[test]
+    fn receive_dispatched_on_empty_calldata() {
+        let src = r#"contract V { uint256 public got;
+            receive() external payable { got = got + msg.value; } }"#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("if in_len == 0 {"));
+        assert!(art.lib_rs.contains("value()"));
+    }
+
+    #[test]
+    fn inheritance_flattens_base_members() {
+        let src = r#"
+            contract Base { address owner; constructor(){ owner = msg.sender; }
+                modifier onlyOwner(){ require(msg.sender==owner); _; } }
+            contract Token is Base { uint256 public total;
+                function mint(uint256 n) public onlyOwner { total += n; } }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        // Base owner -> slot 0, total -> slot 1; onlyOwner guard inlined into mint.
+        assert!(art.lib_rs.contains("store_slot_0(caller());"));
+        assert!(art.lib_rs.contains("if !((caller() == load_slot_0())) { revert(); }"));
+        assert!(art.metadata_json.contains("\"name\": \"Token\""));
+    }
+
+    #[test]
+    fn enum_value_is_inlined_ordinal() {
+        let src = r#"contract E { enum S { A, B, C } S s;
+            function setB() public { s = S.B; }
+            function isC() public view returns (bool) { return s == S.C; } }"#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("store_slot_0(1u128);"));   // S.B == 1
+        assert!(art.lib_rs.contains("load_slot_0() == 2u128"));  // S.C == 2
+    }
+
+    #[test]
+    fn struct_local_lowers_to_field_locals() {
+        let src = r#"contract S { struct P { uint256 x; uint256 y; }
+            function sum(uint256 a, uint256 b) public pure returns (uint256) {
+                P memory p = P(a, b); return p.x + p.y; } }"#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("let mut __s_p_x = a;"));
+        assert!(art.lib_rs.contains("let mut __s_p_y = b;"));
+    }
+
+    #[test]
+    fn cross_contract_call_emits_seal_call() {
+        let src = r#"
+            interface IT { function getValue() external view returns (uint256);
+                function setValue(uint256 v) external; }
+            contract C {
+                function rd(address t) public view returns (uint256) { return IT(t).getValue(); }
+                function wr(address t, uint256 v) public { IT(t).setValue(v); }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        assert!(art.lib_rs.contains("fn seal_call("));
+        assert!(art.lib_rs.contains("fn do_call("));
+        // getValue() selector 0x20965255 -> bytes 32,150,82,85.
+        assert!(art.lib_rs.contains("__ci[0]=32u8; __ci[1]=150u8; __ci[2]=82u8; __ci[3]=85u8;"));
+    }
+
+    #[test]
+    fn cross_contract_call_unknown_method_fails_loud() {
+        // `t.nope()` where `nope` is not a declared external fn is not a
+        // recognized cross-call and must not silently compile to a no-op.
+        let src = r#"contract C {
+            function f(address t) public view returns (uint256) { return INope(t).nope(); } }"#;
+        let err = translate_seal(src).unwrap_err();
+        assert!(err.contains("unsupported") || err.contains("function call"), "got: {err}");
     }
 }
