@@ -1,10 +1,23 @@
 # 🌀 PortalDot Hackathon 2026 — Submission
 
+## 2.1 Public Demo Submission
+
+Public GitHub repository, named per the required format:
+
+> `portaldot-hackathon-2026-inkport-dmk`
+
+Root directory includes:
+
+- `README.md` — the project guide (architecture, install, usage)
+- `LICENSE` — MIT
+- Full source code and configuration files (`translator/`, `inkport/`, `inkport_chain/`, `contracts/`, `tests/`, `playground/`, `docs/`, `inkport.config.py`)
+
 ## 2.2 Submission Form
 
 **Basic Info**
 - **Project Name:** InkPort
-- **Repository URL:** https://github.com/freedanjeremiah/inkide
+- **Team Name:** dmk
+- **Repository URL:** https://github.com/freedanjeremiah/portaldot-hackathon-2026-inkport-dmk
 - **Demo Video URL:** _<add link>_
 
 ---
