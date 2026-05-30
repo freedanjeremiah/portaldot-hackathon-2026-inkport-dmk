@@ -87,6 +87,11 @@ collects unsupported constructs and returns `Err`; preserve that. Integer arithm
 width-aware (`uintN`/`intN` overflow reverts at the declared width; `unchecked` wraps; narrowing
 casts truncate) — keep that consistency when touching `codegen_seal.rs`.
 
+Known representation limit: **`uint256` is stored/encoded as `u128`** (16-byte LE), not true
+256-bit. This is fail-SAFE not silent — checked arithmetic reverts above 2^128 rather than
+wrapping — but values that large can't be represented. `uintN`/`intN` with N≤128 map to
+`u128`/`i128`. Don't claim true 256-bit support.
+
 ## Git
 
 Commits in this repo are authored `Freedan Jeremiah <freedanjeremiah4@gmail.com>` (set via
