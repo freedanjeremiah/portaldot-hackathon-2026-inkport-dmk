@@ -1,12 +1,54 @@
-/* POST /api/translate — fast codegen-only preview (no cargo build).
-   Wire this to the real inkport-translate binary when running on the Linux dev machine:
-     1. Write body.solidity to /tmp/inkport-playground/<sessionId>/<name>.sol
-     2. Run: inkport-translate <file> --target seal --out <tmpdir>/build/<name>/
-     3. Read back src/lib.rs + metadata.json
-     4. Return { rust, metadata } */
-export async function POST(_request: Request) {
-  return Response.json(
-    { error: 'Backend not connected. Run the playground on the same machine as inkport (Linux dev box).' },
-    { status: 501 }
+import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import { buildEnv } from '@/lib/env';
+import { sessionDir } from '@/lib/session';
+import { spawnCollect } from '@/lib/shell';
+
+function parseName(solidity: string): string {
+  const m = /contract\s+([A-Za-z_]\w*)/.exec(solidity);
+  return m ? m[1] : 'Contract';
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  const { solidity, sessionId } = body as { solidity: string; sessionId: string };
+
+  if (!solidity || !sessionId) {
+    return NextResponse.json({ error: 'Missing solidity or sessionId' }, { status: 400 });
+  }
+
+  const env = buildEnv();
+  const inkportRoot = env.INKPORT_ROOT as string;
+  const name = parseName(solidity);
+  const tmpdir = sessionDir(sessionId);
+  const solFile = path.join(tmpdir, `${name}.sol`);
+  const buildDir = path.join(tmpdir, 'build', name);
+
+  fs.mkdirSync(path.join(buildDir, 'src'), { recursive: true });
+  fs.writeFileSync(solFile, solidity, 'utf8');
+
+  const translatorBin = path.join(
+    inkportRoot, 'translator', 'target', 'release', 'inkport-translate'
   );
+
+  const result = await spawnCollect(
+    translatorBin,
+    [solFile, '--target', 'seal', '--out', buildDir],
+    { env }
+  );
+
+  if (result.code !== 0) {
+    return NextResponse.json(
+      { error: (result.stderr || result.stdout).trim() },
+      { status: 400 }
+    );
+  }
+
+  const rustPath = path.join(buildDir, 'src', 'lib.rs');
+  const metaPath = path.join(buildDir, 'metadata.json');
+  const rust = fs.readFileSync(rustPath, 'utf8');
+  const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+
+  return NextResponse.json({ rust, metadata });
 }
