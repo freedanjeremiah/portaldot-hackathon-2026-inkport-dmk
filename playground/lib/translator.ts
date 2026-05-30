@@ -146,10 +146,11 @@ function parse(src: string) {
   const bodyStart = code.indexOf('{');
   const body = bodyStart >= 0 ? code.slice(bodyStart + 1) : code;
 
-  const varRe = /\b(uint\d*|int\d*|bool|address|bytes\d*|string)\s+(public\s+)?(constant\s+|immutable\s+)?([A-Za-z_]\w*)\s*(=|;)/g;
+  // Match all visibility modifiers so private/internal vars get their name captured correctly
+  const varRe = /\b(uint\d*|int\d*|bool|address|bytes\d*|string)\s+(public\s+|private\s+|internal\s+|external\s+)?(constant\s+|immutable\s+)?([A-Za-z_]\w*)\s*(=|;)/g;
   let vm: RegExpExecArray | null;
   while ((vm = varRe.exec(body))) {
-    const isPublic = !!vm[2];
+    const isPublic = !!vm[2] && vm[2].trim() === 'public';
     stateVars.push({ soltype: vm[1], name: vm[4], type: mapType(vm[1]), public: isPublic });
     if (isPublic && !messages.some(mm => mm.name === vm![4])) {
       messages.push({ name: vm[4], selector: selector(vm[4] + '()'), args: [], argNames: [], ret: mapType(vm[1]), mutates: false, payable: false, getter: true });
