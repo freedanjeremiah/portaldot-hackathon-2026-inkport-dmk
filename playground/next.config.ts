@@ -10,10 +10,19 @@ const withMDX = createMDX({
 
 const nextConfig: NextConfig = {
   pageExtensions: ['js', 'jsx', 'ts', 'tsx', 'md', 'mdx'],
-  // Optional isolated build dir (defaults to `.next`, so unset = unchanged
-  // behaviour). Lets a second concurrent `next dev` use its own dir instead
-  // of clobbering a shared `.next`; set NEXT_DIST_DIR to opt in.
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
+  async headers() {
+    return [
+      {
+        source: '/api/:path*',
+        headers: [
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+          { key: 'Access-Control-Allow-Methods', value: 'GET,POST,OPTIONS' },
+          { key: 'Access-Control-Allow-Headers', value: 'Content-Type' },
+        ],
+      },
+    ];
+  },
 };
 
 export default withMDX(nextConfig);
