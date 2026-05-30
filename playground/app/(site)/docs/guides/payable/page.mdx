@@ -1,0 +1,52 @@
+export const metadata = { title: 'Payable Contracts — InkPort Guides' };
+
+<div className="docs-tag">Guide</div>
+
+# Payable contracts
+
+Receiving and holding POT inside a contract.
+
+## msg.value in Solidity → seal_value_transferred in seal0
+
+When you mark a function `payable` in Solidity:
+
+```solidity
+function deposit() public payable {
+    balances[msg.sender] += msg.value;
+}
+```
+
+The translator emits a `seal_value_transferred` call that reads the transferred value in plancks (1 POT = 10¹⁴ plancks):
+
+```rust
+unsafe { seal0::seal_value_transferred(buf.as_mut_ptr(), &mut len) }
+let amount = u128::from_le_bytes(buf);
+```
+
+## The Bank contract
+
+```bash
+inkport translate contracts/Bank.sol
+inkport build Bank
+inkport deploy Bank
+inkport call Bank deposit --value 5          # deposit 5 POT
+inkport call Bank balanceOf --arg //Alice    # → 500000000000000
+inkport call Bank withdraw --arg 200000000000000
+```
+
+`--value 5` passes 5 POT (in plancks: `5 × 10¹⁴`). `balanceOf` returns plancks. Withdraw takes a planck amount.
+
+## Test spec (`tests/Bank.json`)
+
+```json
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy" },
+    { "action": "call", "message": "deposit", "value": 5, "signer": "//Alice" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 500000000000000 }
+  ]
+}
+```
+
+The `"value": 5` field in test steps is in POT; the harness converts to plancks before calling.

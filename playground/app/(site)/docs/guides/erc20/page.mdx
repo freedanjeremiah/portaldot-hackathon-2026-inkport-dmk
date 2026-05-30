@@ -1,0 +1,75 @@
+export const metadata = { title: 'ERC20 Walkthrough — InkPort Guides' };
+
+<div className="docs-tag">Guide</div>
+
+# ERC20 walkthrough
+
+Deploying a standard fungible token end-to-end.
+
+## The contract
+
+`contracts/ERC20.sol` (abridged):
+
+```solidity
+contract ERC20 {
+    mapping(address => uint256) private balances;
+    mapping(address => mapping(address => uint256)) private allowances;
+    uint256 public totalSupply;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(uint256 initialSupply) {
+        totalSupply = initialSupply;
+        balances[msg.sender] = initialSupply;
+    }
+
+    function transfer(address to, uint256 value) public returns (bool) {
+        require(balances[msg.sender] >= value, "insufficient");
+        balances[msg.sender] -= value;
+        balances[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+}
+```
+
+## What the translator produces
+
+The nested `mapping(address => mapping(address => uint256))` flattens to a tuple-keyed mapping in the generated Rust. The `metadata.json` selectors use keccak256:
+
+```json
+{
+  "messages": [
+    { "name": "transfer", "selector": "0xa9059cbb", "args": ["address","u128"], "ret": "bool", "mutates": true },
+    { "name": "balanceOf", "selector": "0x70a08231", "args": ["address"], "ret": "u128", "mutates": false }
+  ]
+}
+```
+
+## Full lifecycle
+
+```bash
+inkport translate contracts/ERC20.sol
+inkport build ERC20
+inkport deploy ERC20 --arg 1000000
+inkport call ERC20 balanceOf --arg //Alice   # → 1000000
+inkport call ERC20 transfer --arg //Bob --arg 250
+inkport call ERC20 balanceOf --arg //Bob     # → 250
+```
+
+## Test spec (`tests/ERC20.json`)
+
+```json
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [1000000] },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1000000 },
+    { "action": "call", "message": "transfer", "args": ["//Bob", 1000], "signer": "//Alice" },
+    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Bob", "value": 1000 } },
+    { "action": "read", "message": "balanceOf", "args": ["//Bob"], "expected": 1000 },
+    { "action": "revert", "message": "transfer", "args": ["//Bob", 1000000000], "signer": "//Charlie" }
+  ]
+}
+```

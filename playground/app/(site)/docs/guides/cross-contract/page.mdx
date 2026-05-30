@@ -1,0 +1,54 @@
+export const metadata = { title: 'Cross-Contract Calls — InkPort Guides' };
+
+<div className="docs-tag">Guide</div>
+
+# Cross-contract calls
+
+Calling one deployed contract from another.
+
+## Interface pattern in Solidity
+
+```solidity
+interface ITarget {
+    function set(uint256 v) external;
+    function get() external view returns (uint256);
+}
+
+contract Caller {
+    ITarget private target;
+    constructor(address t) { target = ITarget(t); }
+    function callSet(uint256 v) public { target.set(v); }
+    function callGet() public view returns (uint256) { return target.get(); }
+}
+```
+
+The translator emits `seal_call` with the keccak4 selector of `set(u128)` / `get()`.
+
+## Deploying the pair
+
+The `@label` syntax in test specs lets you deploy `Target` first and reference its address in `Caller`'s constructor:
+
+```json
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy_dep", "name": "Target", "args": [], "as": "target" },
+    { "action": "deploy", "args": ["@target"] },
+    { "action": "call", "message": "callSet", "args": [42] },
+    { "action": "read", "message": "callGet", "args": [], "expected": 42 }
+  ]
+}
+```
+
+`"@target"` is replaced at runtime with the SS58 address of the deployed `Target` instance.
+
+## CLI
+
+```bash
+inkport deploy Target
+# deployed Target -> 5DtarG...
+
+inkport deploy Caller --arg 5DtarG...
+inkport call Caller callSet --arg 42
+inkport call Caller callGet              # → 42
+```

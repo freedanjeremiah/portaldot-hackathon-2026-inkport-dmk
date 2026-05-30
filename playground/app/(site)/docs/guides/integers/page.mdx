@@ -1,0 +1,49 @@
+export const metadata = { title: 'Integer Width Semantics — InkPort Guides' };
+
+<div className="docs-tag">Guide</div>
+
+# Integer width semantics
+
+InkPort implements true bit-width semantics for every `uintN` / `intN` type.
+
+## Width-checked arithmetic (default)
+
+```solidity
+function add(uint8 a, uint8 b) public pure returns (uint8) {
+    return a + b;   // reverts if result > 255
+}
+```
+
+`uint8 + uint8` is checked at the declared width. `255 + 1` reverts — it does **not** wrap silently.
+
+## unchecked{} wraps
+
+```solidity
+function addWrap(uint8 a, uint8 b) public pure returns (uint8) {
+    unchecked { return a + b; }   // 255 + 1 == 0
+}
+```
+
+Inside `unchecked {}`, arithmetic wraps at the declared width. `uint8(255) + 1 == 0`.
+
+## Narrowing casts truncate
+
+```solidity
+function cast8(uint256 v) public pure returns (uint8) {
+    return uint8(v);   // uint8(256) == 0, uint8(257) == 1
+}
+```
+
+Narrowing casts (`uint8(x)`) truncate to the lower N bits. `uint8(256) == 0`.
+
+## All three behaviours verified on-chain
+
+```bash
+inkport test NarrowMath    # uint16 overflow → revert  ✓
+inkport test Unchecked     # unchecked wraps            ✓
+inkport test Cast          # uint8(256) == 0            ✓
+```
+
+## Storage representation
+
+All integers are stored as `u128` / `i128` at rest (16-byte SCALE LE). Width enforcement happens at arithmetic boundaries, not in storage. A `uint8` variable reads back as a `u128` but arithmetic on it is checked at 255.
