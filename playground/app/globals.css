@@ -53,7 +53,9 @@ html, body {
   font-family: var(--ui);
   -webkit-font-smoothing: antialiased;
 }
-#root, body > div { height: 100%; }
+/* IDE shell only — was `body > div`, which also clamped the marketing .site-wrap
+   to one viewport and broke natural scrolling on every site page. */
+#root { height: 100%; }
 
 ::selection { background: rgba(249,115,22,0.30); }
 
