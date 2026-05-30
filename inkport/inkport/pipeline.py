@@ -139,6 +139,10 @@ def coerce_arg(ty: str, value: Any) -> Any:
         if isinstance(value, bool):
             return value
         return str(value).lower() in ("1", "true", "yes", "on")
+    if ty in ("string", "bytes"):
+        # Pass strings through verbatim; the chain encoder handles SCALE
+        # compact-length prefixing (and 0x-hex for `bytes`).
+        return value
     raise ValueError(f"unknown metadata arg type: {ty}")
 
 

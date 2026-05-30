@@ -22,6 +22,8 @@ pub fn render_type(t: &Type) -> String {
             ),
             _ => format!("Mapping<{}, {}>", render_type(k), render_type(v)),
         },
+        Type::Array(elem) => format!("Vec<{}>", render_type(elem)),
+        Type::Struct(name) => name.clone(),
     }
 }
 

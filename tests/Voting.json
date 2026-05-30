@@ -1,0 +1,17 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "count", "args": [], "expected": 0 },
+    { "action": "call", "message": "addProposal", "args": [] },
+    { "action": "call", "message": "addProposal", "args": [] },
+    { "action": "read", "message": "count", "args": [], "expected": 2 },
+    { "action": "read", "message": "votesOf", "args": [0], "expected": 0 },
+    { "action": "call", "message": "vote", "args": [1] },
+    { "action": "call", "message": "vote", "args": [1] },
+    { "action": "call", "message": "vote", "args": [0] },
+    { "action": "read", "message": "votesOf", "args": [0], "expected": 1 },
+    { "action": "read", "message": "votesOf", "args": [1], "expected": 2 },
+    { "action": "read", "message": "winner", "args": [], "expected": 1 }
+  ]
+}

@@ -22,9 +22,37 @@ pub fn map_type(expr: &Expression, uint_strategy: &str) -> Option<Type> {
             }
             _ => None,
         },
+        // `T[]` dynamic array: solang renders the type as an ArraySubscript with
+        // no index expression over the element type.
+        Expression::ArraySubscript(_, base, None) => {
+            let elem = map_type(base, uint_strategy)?;
+            Some(Type::Array(Box::new(elem)))
+        }
         Expression::Variable(id) => map_elementary(&id.name, uint_strategy),
         _ => None,
     }
+}
+
+/// Like `map_type` but resolves an unknown type-name `Variable` to a named
+/// `Struct`. Used by the seal0 backend, which knows the contract's struct
+/// definitions; the ink! path keeps the conservative `map_type`.
+pub fn map_type_structs(expr: &Expression, uint_strategy: &str) -> Option<Type> {
+    if let Expression::Variable(id) = expr {
+        if let Some(t) = map_elementary(&id.name, uint_strategy) {
+            return Some(t);
+        }
+        return Some(Type::Struct(id.name.clone()));
+    }
+    if let Expression::Type(_, PtType::Mapping { key, value, .. }) = expr {
+        let k = map_type_structs(key, uint_strategy)?;
+        let v = map_type_structs(value, uint_strategy)?;
+        return Some(Type::Mapping(Box::new(k), Box::new(v)));
+    }
+    if let Expression::ArraySubscript(_, base, None) = expr {
+        let elem = map_type_structs(base, uint_strategy)?;
+        return Some(Type::Array(Box::new(elem)));
+    }
+    map_type(expr, uint_strategy)
 }
 
 /// Lower storage variable definitions from a contract into IR Fields.
@@ -33,6 +61,25 @@ pub fn lower_storage(def: &ContractDefinition, uint_strategy: &str) -> Vec<Field
     for part in &def.parts {
         if let ContractPart::VariableDefinition(v) = part {
             if let Some(ty) = map_type(&v.ty, uint_strategy) {
+                if let Some(name) = &v.name {
+                    let public = v.attrs.iter().any(|a| {
+                        matches!(a, VariableAttribute::Visibility(Visibility::Public(_)))
+                    });
+                    out.push(Field { name: name.name.clone(), ty, public });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Struct-aware storage lowering for the seal0 backend: resolves user-defined
+/// struct value/element types (which `map_type` leaves as `None`).
+pub fn lower_storage_structs(def: &ContractDefinition, uint_strategy: &str) -> Vec<Field> {
+    let mut out = Vec::new();
+    for part in &def.parts {
+        if let ContractPart::VariableDefinition(v) = part {
+            if let Some(ty) = map_type_structs(&v.ty, uint_strategy) {
                 if let Some(name) = &v.name {
                     let public = v.attrs.iter().any(|a| {
                         matches!(a, VariableAttribute::Visibility(Visibility::Public(_)))

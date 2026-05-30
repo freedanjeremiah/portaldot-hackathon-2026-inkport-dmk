@@ -1,0 +1,17 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": ["//Bob", "//Charlie"], "value": 10 },
+    { "action": "read", "message": "buyer", "args": [], "expected": "//Alice" },
+    { "action": "read", "message": "seller", "args": [], "expected": "//Bob" },
+    { "action": "read", "message": "arbiter", "args": [], "expected": "//Charlie" },
+    { "action": "read", "message": "released", "args": [], "expected": false },
+    { "action": "call", "message": "deposit", "args": [], "signer": "//Alice", "value": 3 },
+    { "action": "read", "message": "balance", "args": [], "expected": 300000000000000 },
+    { "action": "revert", "message": "release", "args": [], "signer": "//Bob" },
+    { "action": "call", "message": "release", "args": [], "signer": "//Charlie" },
+    { "action": "read", "message": "released", "args": [], "expected": true },
+    { "action": "read", "message": "balance", "args": [], "expected": 0 },
+    { "action": "revert", "message": "release", "args": [], "signer": "//Charlie" }
+  ]
+}

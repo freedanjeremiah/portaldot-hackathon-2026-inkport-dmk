@@ -1,0 +1,18 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "read", "message": "len", "args": [], "expected": 0 },
+    { "action": "call", "message": "add", "args": [10] },
+    { "action": "call", "message": "add", "args": [20] },
+    { "action": "call", "message": "add", "args": [30] },
+    { "action": "read", "message": "len", "args": [], "expected": 3 },
+    { "action": "read", "message": "get", "args": [0], "expected": 10 },
+    { "action": "read", "message": "get", "args": [1], "expected": 20 },
+    { "action": "read", "message": "get", "args": [2], "expected": 30 },
+    { "action": "read", "message": "sum", "args": [], "expected": 60 },
+    { "action": "call", "message": "set", "args": [1, 99] },
+    { "action": "read", "message": "get", "args": [1], "expected": 99 },
+    { "action": "read", "message": "sum", "args": [], "expected": 139 }
+  ]
+}

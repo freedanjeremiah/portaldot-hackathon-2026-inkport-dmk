@@ -27,6 +27,30 @@ from inkport_chain.portaldot import Portaldot, GAS  # noqa: E402
 # --------------------------------------------------------------------------
 # SCALE encode/decode for the scalar tier.
 # --------------------------------------------------------------------------
+def _compact_len(n):
+    """SCALE Compact<u32> encoding of a length (single/two/four-byte modes)."""
+    if n < 64:
+        return bytes([n << 2])
+    if n < 2 ** 14:
+        v = (n << 2) | 1
+        return bytes([v & 0xFF, (v >> 8) & 0xFF])
+    if n < 2 ** 30:
+        v = (n << 2) | 2
+        return v.to_bytes(4, "little")
+    raise ValueError(f"length {n} too large for compact encoding")
+
+
+def _str_to_bytes(value):
+    """Coerce a string/bytes arg value to raw bytes."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        if value.startswith("0x"):
+            return bytes.fromhex(value[2:])
+        return value.encode("utf-8")
+    raise ValueError(f"cannot encode string/bytes value {value!r}")
+
+
 def encode_arg(ty, value):
     if ty == "bool":
         return bytes([1 if value else 0])
@@ -40,11 +64,30 @@ def encode_arg(ty, value):
             value = bytes.fromhex(value[2:] if value.startswith("0x") else value)
         assert len(value) == 32, "address must be 32 bytes"
         return value
+    if ty in ("string", "bytes"):
+        raw = _str_to_bytes(value)
+        return _compact_len(len(raw)) + raw
     raise ValueError(f"unknown arg type {ty}")
 
 
 def _scalar_len(ty):
     return 32 if ty == "address" else (1 if ty == "bool" else 16)
+
+
+def _decode_compact(raw):
+    """Decode a SCALE Compact<u32> at the start of `raw`; return (value, n_bytes)."""
+    if not raw:
+        return 0, 0
+    b0 = raw[0]
+    mode = b0 & 3
+    if mode == 0:
+        return b0 >> 2, 1
+    if mode == 1:
+        return ((b0 >> 2) | (raw[1] << 6)), 2
+    if mode == 2:
+        v = int.from_bytes(raw[:4], "little")
+        return v >> 2, 4
+    raise ValueError("big-integer compact mode unsupported")
 
 
 def _decode_scalar(ty, raw):
@@ -57,6 +100,12 @@ def _decode_scalar(ty, raw):
         return int.from_bytes(raw[:16], "little", signed=True) if raw else 0
     if ty == "address":
         return "0x" + raw[:32].hex() if raw else "0x" + "00" * 32
+    if ty in ("string", "bytes"):
+        n, off = _decode_compact(raw)
+        payload = raw[off:off + n]
+        if ty == "bytes":
+            return "0x" + payload.hex()
+        return payload.decode("utf-8", errors="replace")
     raise ValueError(f"unknown ret type {ty}")
 
 

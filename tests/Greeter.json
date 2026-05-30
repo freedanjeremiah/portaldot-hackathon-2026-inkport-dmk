@@ -1,0 +1,11 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": ["hello world"] },
+    { "action": "read", "message": "greet", "args": [], "expected": "hello world" },
+    { "action": "call", "message": "setGreeting", "args": ["gm, portaldot!"] },
+    { "action": "read", "message": "greet", "args": [], "expected": "gm, portaldot!" },
+    { "action": "call", "message": "setGreeting", "args": [""] },
+    { "action": "read", "message": "greet", "args": [], "expected": "" }
+  ]
+}

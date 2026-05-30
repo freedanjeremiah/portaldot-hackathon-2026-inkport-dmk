@@ -1,0 +1,19 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [] },
+    { "action": "call", "message": "mint", "args": ["//Alice", 1], "signer": "//Alice" },
+    { "action": "event", "name": "Transfer", "expected": { "to": "//Alice", "id": 1 } },
+    { "action": "read", "message": "ownerOf", "args": [1], "expected": "//Alice" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1 },
+    { "action": "call", "message": "mint", "args": ["//Alice", 2], "signer": "//Alice" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 2 },
+    { "action": "revert", "message": "mint", "args": ["//Bob", 1], "signer": "//Alice" },
+    { "action": "call", "message": "transferFrom", "args": ["//Alice", "//Bob", 1], "signer": "//Alice" },
+    { "action": "event", "name": "Transfer", "expected": { "from": "//Alice", "to": "//Bob", "id": 1 } },
+    { "action": "read", "message": "ownerOf", "args": [1], "expected": "//Bob" },
+    { "action": "read", "message": "balanceOf", "args": ["//Alice"], "expected": 1 },
+    { "action": "read", "message": "balanceOf", "args": ["//Bob"], "expected": 1 },
+    { "action": "revert", "message": "transferFrom", "args": ["//Charlie", "//Bob", 1], "signer": "//Charlie" }
+  ]
+}

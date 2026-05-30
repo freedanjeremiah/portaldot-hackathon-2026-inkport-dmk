@@ -1,0 +1,17 @@
+{
+  "deployer": "//Alice",
+  "steps": [
+    { "action": "deploy", "args": [1000000000000], "value": 10 },
+    { "action": "read", "message": "beneficiary", "args": [], "expected": "//Alice" },
+    { "action": "read", "message": "highestBid", "args": [], "expected": 0 },
+    { "action": "call", "message": "bid", "args": [], "signer": "//Bob", "value": 2 },
+    { "action": "event", "name": "HighestBidIncreased", "expected": { "bidder": "//Bob", "amount": 200000000000000 } },
+    { "action": "read", "message": "highestBid", "args": [], "expected": 200000000000000 },
+    { "action": "read", "message": "highestBidder", "args": [], "expected": "//Bob" },
+    { "action": "call", "message": "bid", "args": [], "signer": "//Charlie", "value": 5 },
+    { "action": "read", "message": "highestBid", "args": [], "expected": 500000000000000 },
+    { "action": "read", "message": "highestBidder", "args": [], "expected": "//Charlie" },
+    { "action": "read", "message": "highestBidOf", "args": [], "expected": 500000000000000 },
+    { "action": "revert", "message": "bid", "args": [], "signer": "//Dave", "value": 1 }
+  ]
+}

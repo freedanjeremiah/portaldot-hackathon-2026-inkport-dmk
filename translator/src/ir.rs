@@ -8,6 +8,11 @@ pub enum Type {
     String,
     Bytes,
     Mapping(Box<Type>, Box<Type>),
+    /// Dynamic array `T[]`.
+    Array(Box<Type>),
+    /// A user-defined struct, referenced by name. Field layout is resolved in
+    /// the seal0 backend from the parsed struct definitions.
+    Struct(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
