@@ -1,0 +1,71 @@
+/* ============================================================
+   InkPort — burnt parchment material overlays.
+   The whole site is a sheet of aged cream paper with charred,
+   ember-lit, ragged-burnt edges.
+   ============================================================ */
+
+/* ---- page: cream parchment with paper grain ---- */
+.site-wrap {
+  position: relative;
+  min-height: 100dvh;
+  background-color: #f0e8d5;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65 0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23p)'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.14' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3C/svg%3E"),
+    radial-gradient(ellipse 90% 80% at 50% 45%, #f3ecda, #e7d9bd 100%);
+  background-size: 150px 150px, 600px 600px, cover;
+  background-attachment: fixed;
+  background-blend-mode: soft-light, soft-light, normal;
+}
+
+/* ---- old scorch / water stains drifting across the sheet ---- */
+.burn-smoke {
+  position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0.55;
+  mix-blend-mode: multiply;
+  background:
+    radial-gradient(ellipse 26% 16% at 16% 26%, rgba(74,38,12,0.22), transparent 70%),
+    radial-gradient(ellipse 30% 12% at 82% 38%, rgba(60,28,8,0.18), transparent 72%),
+    radial-gradient(ellipse 18% 22% at 66% 72%, rgba(80,42,14,0.20), transparent 70%),
+    radial-gradient(ellipse 22% 14% at 34% 86%, rgba(60,30,10,0.16), transparent 72%),
+    radial-gradient(ellipse 14% 18% at 92% 84%, rgba(70,36,12,0.18), transparent 70%);
+}
+
+/* ---- visible paper fibre grain ---- */
+.burn-grain {
+  position: fixed; inset: 0; z-index: 9990; pointer-events: none; opacity: 0.16;
+  mix-blend-mode: soft-light;
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65 0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  background-size: 150px 150px;
+}
+
+/* ---- charred, ember-lit, ragged burnt edge of the sheet ---- */
+.burn-frame {
+  position: fixed; inset: 0; z-index: 9500; pointer-events: none;
+  /* deep char blooms in the corners */
+  background:
+    radial-gradient(closest-side at 0 0,       rgba(20,11,3,0.95), rgba(70,34,12,0.45) 42%, transparent 72%),
+    radial-gradient(closest-side at 100% 0,    rgba(20,11,3,0.95), rgba(70,34,12,0.45) 42%, transparent 72%),
+    radial-gradient(closest-side at 0 100%,    rgba(20,11,3,0.95), rgba(70,34,12,0.45) 42%, transparent 72%),
+    radial-gradient(closest-side at 100% 100%, rgba(20,11,3,0.95), rgba(70,34,12,0.45) 42%, transparent 72%);
+  background-size: 200px 200px, 200px 200px, 200px 200px, 200px 200px;
+  background-position: 0 0, 100% 0, 0 100%, 100% 100%;
+  background-repeat: no-repeat;
+  /* edge: black char → ember glow → brown scorch → heat halo */
+  box-shadow:
+    inset 0 0 0 2px #160c03,
+    inset 0 0 7px 1px rgba(20,11,2,0.92),
+    inset 0 0 12px 4px rgba(255,118,22,0.5),
+    inset 0 0 24px 7px rgba(112,56,20,0.6),
+    inset 0 0 50px 16px rgba(150,92,46,0.32),
+    inset 0 0 110px 40px rgba(176,120,66,0.14);
+  filter: url(#burnFrame);
+}
+
+/* ---- SVG hidden filter defs wrapper ---- */
+.burn-svg-defs {
+  position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none;
+}
+
+/* ---- nav sits above burn-frame ---- */
+.nav { z-index: 9600 !important; }

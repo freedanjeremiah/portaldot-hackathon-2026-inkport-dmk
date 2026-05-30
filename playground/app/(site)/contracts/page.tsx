@@ -7,12 +7,13 @@ export const metadata = {
 
 export default function ContractsPage() {
   return (
-    <div className="site-container" style={{ paddingTop: 48, paddingBottom: 80 }}>
+    <div className="wrap" style={{ paddingTop: 64, paddingBottom: 80 }}>
       <div style={{ marginBottom: 36 }}>
-        <h1 className="site-h1" style={{ textAlign: 'left', fontSize: 'var(--h2)', marginBottom: 10 }}>
+        <p className="eyebrow">Validated on-chain</p>
+        <h1 style={{ fontSize: 46, lineHeight: 1.08, letterSpacing: '-0.03em', fontWeight: 600, margin: '0 0 14px' }}>
           Validated Contracts
         </h1>
-        <p style={{ fontSize: 'var(--body)', color: 'var(--text-dim)', lineHeight: 1.65, maxWidth: 580, margin: 0 }}>
+        <p style={{ fontSize: 18, color: 'var(--text-dim)', lineHeight: 1.6, maxWidth: 680, margin: 0 }}>
           30 Solidity contracts — each translated, built, deployed, and asserted on the live Portaldot node.
           Real extrinsics, real receipts, no mocks.
         </p>
