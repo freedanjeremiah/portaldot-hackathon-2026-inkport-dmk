@@ -2,10 +2,11 @@
 import { useState, useEffect, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { translate } from '@/lib/translator';
-import { buildCompile, buildDeploy, buildCall, stream } from '@/lib/simbackend';
+import { readSSE } from '@/lib/sse';
+import type { SSEPayload } from '@/lib/sse';
 import { Stepper, CompilePanel, DeployPanel, CallPanel, Ic } from '@/components/Pipeline';
+import type { LogLine } from '@/components/Pipeline';
 import type { Metadata } from '@/lib/translator';
-import type { LogLine, CallState } from '@/lib/simbackend';
 import type { Statuses, CompileState, DeployState, CallPanelState } from '@/components/Pipeline';
 
 const FauxEditor = dynamic(() => import('@/components/FauxEditor'), { ssr: false });
@@ -60,14 +61,23 @@ export default function PlaygroundPage() {
   const [compile, setCompile] = useState<CompileState>({ lines: [], running: false, wasmSize: 0, error: null });
   const [deploy, setDeploy] = useState<DeployState>({ args: [], lines: [], running: false, address: null, error: null });
   const [call, setCall] = useState<CallPanelState>({ selected: 0, args: [], value: '', lines: [], running: false, result: null, events: [], error: null });
-  const [counter, setCounter] = useState<CallState>({ count: 0 });
+  const [wasmB64, setWasmB64] = useState<string | null>(null);
 
   const [active, setActive] = useState('compile');
   const [leftPct, setLeftPct] = useState(50);
   const [pipeH, setPipeH] = useState(330);
 
   const firstRef = useRef(true);
-  const cancelRef = useRef<(() => void) | null>(null);
+  const sessionIdRef = useRef<string>('');
+
+  useEffect(() => {
+    if (!sessionIdRef.current) {
+      const stored = sessionStorage.getItem('inkport-session-id');
+      const id = stored ?? crypto.randomUUID();
+      if (!stored) sessionStorage.setItem('inkport-session-id', id);
+      sessionIdRef.current = id;
+    }
+  }, []);
 
   /* live translate (debounced) */
   useEffect(() => {
@@ -97,7 +107,6 @@ export default function PlaygroundPage() {
         }
         firstRef.current = false;
       }, 200 + Math.random() * 240);
-      cancelRef.current = () => clearTimeout(t2);
     }, delay);
     return () => { cancelled = true; clearTimeout(t); };
   }, [solidity]);
@@ -112,63 +121,110 @@ export default function PlaygroundPage() {
   };
   const runningWhat = compile.running ? 'compile' : deploy.running ? 'deploy' : call.running ? 'call' : null;
 
-  const onCompile = () => {
+  const onCompile = async () => {
     if (compile.running) return;
     setActive('compile');
-    const res = translate(solidity);
-    if ('error' in res && res.error) {
-      setCompile({ running: true, lines: [], wasmSize: 0, error: null });
-      const fail: LogLine[] = [
-        [['lg-cmd', '$ '], ['', 'inkport-translate contract.sol --target seal']],
-        [['lg-dim', '  parsing … ']],
-        [['lg-err', '  ' + res.error]],
-        [['lg-err', '  ✗ translate failed — exit 1 (nothing built)']],
-      ];
-      stream(fail, {
-        onLine: (ln: LogLine) => setCompile(c => ({ ...c, lines: [...c.lines, ln] })),
-        onDone: () => setCompile(c => ({ ...c, running: false, error: res.error })),
-      });
-      return;
+    setCompile({ lines: [], running: true, wasmSize: 0, error: null });
+    setWasmB64(null);
+
+    try {
+      await readSSE(
+        '/api/compile',
+        { solidity, sessionId: sessionIdRef.current },
+        {
+          onLine: (payload: SSEPayload) => {
+            const seg: LogLine = [[payload.cls ?? 'lg-dim', payload.text ?? '']];
+            setCompile(c => ({ ...c, lines: [...c.lines, seg] }));
+          },
+          onDone: (payload: SSEPayload) => {
+            if (payload.type === 'wasm') {
+              const wasm = payload.data as string;
+              const metaPayload = payload.metadata as Metadata;
+              const sz = (payload.size as number) ?? 0;
+              setWasmB64(wasm);
+              setMetadata(metaPayload);
+              setCompile(c => ({ ...c, running: false, wasmSize: sz }));
+              setActive('deploy');
+            }
+          },
+          onError: (payload: SSEPayload) => {
+            setCompile(c => ({ ...c, running: false, error: (payload.log as string) ?? 'compile failed' }));
+          },
+        }
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCompile(c => ({ ...c, running: false, error: msg }));
     }
-    const built = buildCompile((res as { metadata: Metadata }).metadata.name);
-    setCompile({ running: true, lines: [], wasmSize: 0, error: null });
-    setMetadata((res as { metadata: Metadata }).metadata);
-    cancelRef.current && cancelRef.current();
-    cancelRef.current = stream(built.lines, {
-      onLine: (ln: LogLine) => setCompile(c => ({ ...c, lines: [...c.lines, ln] })),
-      onDone: () => { setCompile(c => ({ ...c, running: false, wasmSize: built.wasmSize })); setActive('deploy'); },
-    });
   };
 
-  const onDeploy = () => {
-    if (deploy.running || !compile.wasmSize) return;
+  const onDeploy = async () => {
+    if (deploy.running || !wasmB64) return;
     setActive('deploy');
-    const initial = parseInt((deploy.args[0] || '0'), 10);
-    const built = buildDeploy(meta.name, deploy.args);
     setDeploy(d => ({ ...d, running: true, lines: [], address: null, error: null }));
-    cancelRef.current = stream(built.lines, {
-      onLine: (ln: LogLine) => setDeploy(d => ({ ...d, lines: [...d.lines, ln] })),
-      onDone: () => {
-        setDeploy(d => ({ ...d, running: false, address: built.address }));
-        setCounter({ count: isNaN(initial) ? 0 : initial });
-        setActive('call');
-      },
-    });
+
+    try {
+      await readSSE(
+        '/api/deploy',
+        { wasmB64, metadata: meta, args: deploy.args, sessionId: sessionIdRef.current },
+        {
+          onLine: (payload: SSEPayload) => {
+            const seg: LogLine = [[payload.cls ?? 'lg-dim', payload.text ?? '']];
+            setDeploy(d => ({ ...d, lines: [...d.lines, seg] }));
+          },
+          onDone: (payload: SSEPayload) => {
+            if (payload.type === 'address') {
+              setDeploy(d => ({ ...d, running: false, address: payload.address as string }));
+              setActive('call');
+            }
+          },
+          onError: (payload: SSEPayload) => {
+            setDeploy(d => ({ ...d, running: false, error: (payload.log as string) ?? 'deploy failed' }));
+          },
+        }
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDeploy(d => ({ ...d, running: false, error: msg }));
+    }
   };
 
-  const onCall = () => {
+  const onCall = async () => {
     if (call.running || !deploy.address) return;
     const msg = meta.messages[call.selected];
     if (!msg) return;
-    const built = buildCall(meta.name, msg, call.args, counter);
+
     setCall(c => ({ ...c, running: true, lines: [], result: null, events: [], error: null }));
-    cancelRef.current = stream(built.lines, {
-      onLine: (ln: LogLine) => setCall(c => ({ ...c, lines: [...c.lines, ln] })),
-      onDone: () => {
-        setCounter(built.newState || counter);
-        setCall(c => ({ ...c, running: false, result: built.error ? null : built.result, events: built.events || [], error: built.error }));
-      },
-    });
+
+    try {
+      const response = await fetch('/api/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metadata: meta,
+          message: msg.name,
+          args: call.args,
+          sessionId: sessionIdRef.current,
+        }),
+      });
+
+      const data = await response.json() as { result?: unknown; events?: unknown[]; error?: string };
+
+      if (!response.ok || data.error) {
+        setCall(c => ({ ...c, running: false, error: data.error ?? 'call failed' }));
+      } else {
+        setCall(c => ({
+          ...c,
+          running: false,
+          result: String(data.result ?? 'ok'),
+          events: data.events ?? [],
+          error: null,
+        }));
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCall(c => ({ ...c, running: false, error: msg }));
+    }
   };
 
   const bus = {
@@ -178,7 +234,7 @@ export default function PlaygroundPage() {
     setCallMsg: (i: number) => setCall(c => ({ ...c, selected: i, args: [], value: '', result: null, error: null, lines: [] })),
     setCallArg: (i: number, v: string) => setCall(c => { const a = [...c.args]; a[i] = v; return { ...c, args: a }; }),
     setCallValue: (v: string) => setCall(c => ({ ...c, value: v })),
-    copy: (t: string) => { navigator.clipboard && navigator.clipboard.writeText(t); },
+    copy: (t: string) => { navigator.clipboard?.writeText(t); },
   };
 
   /* drag: editor split */

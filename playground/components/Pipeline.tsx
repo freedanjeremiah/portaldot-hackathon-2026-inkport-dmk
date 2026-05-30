@@ -1,7 +1,8 @@
 'use client';
 import { useRef, useEffect, useState } from 'react';
 import type { Metadata, MetadataMessage } from '@/lib/translator';
-import type { LogLine, CallState } from '@/lib/simbackend';
+export type LogSegment = [string, string];
+export type LogLine = LogSegment[];
 
 /* ---------- icons ---------- */
 const Ic = {
