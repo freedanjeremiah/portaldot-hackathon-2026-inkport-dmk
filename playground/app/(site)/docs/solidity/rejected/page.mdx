@@ -1,0 +1,26 @@
+export const metadata = { title: 'Rejected Constructs — InkPort Docs' };
+
+<div className="docs-tag">Solidity Coverage</div>
+
+# Rejected constructs
+
+When `inkport translate` encounters any of the following, it exits non-zero with a descriptive error. Nothing is emitted.
+
+| Construct | Error message |
+|---|---|
+| `assembly { ... }` | `unsupported: inline assembly` |
+| `delegatecall` | `unsupported: delegatecall (no host function on rent-era pallet-contracts)` |
+| `tx.origin` | `unsupported: tx.origin is not available under seal0` |
+| `abi.encodePacked(...)` | `unsupported: abi.encodePacked — use typed args` |
+| `library Foo { ... }` | `unsupported: library definitions — flatten into the contract` |
+| ternary `a ? b : c` | `unsupported: ternary ?: — use if/else` |
+| `new Foo(...)` | `unsupported: new factory deployment` |
+| struct in array | `unsupported: struct-in-array storage` |
+| nested structs | `unsupported: nested struct types` |
+| `string`/`bytes` as non-trailing param | `unsupported: string/bytes param must be last` |
+| `tx.gasprice`, `block.coinbase` | `unsupported: EVM-only context variable` |
+| struct return across ABI | `unsupported: struct ABI return type` |
+
+## Why fail-loud?
+
+A wrong-but-compiling contract is worse than a rejected one. Silently dropping a modifier or miscompiling an overflow check would produce a contract that deploys successfully but behaves incorrectly. InkPort's integrity guarantee is: if `translate` exits 0, the output is semantically correct. If it can't guarantee that, it exits 1.

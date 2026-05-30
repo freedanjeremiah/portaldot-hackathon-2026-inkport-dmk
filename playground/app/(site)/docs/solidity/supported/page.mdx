@@ -1,0 +1,19 @@
+export const metadata = { title: 'Supported Solidity — InkPort Docs' };
+
+<div className="docs-tag">Solidity Coverage</div>
+
+# Supported Solidity surface
+
+| Area | Supported |
+|---|---|
+| Scalar types | `bool`, `uintN`→`u128` (width-checked), `intN`→`i128` (width-checked), `address`→`AccountId`, `bytes`/`string` (compact-length, trailing param), `bytes32` |
+| Collections | `mapping(K=>V)` (address & scalar keys), nested mappings, dynamic arrays `T[]` (`.push`/`.length`/index), `mapping(K=>Struct)` field access |
+| Functions | constructor, view / mutating / `payable`, public-var auto-getters, multiple returns, function overloading |
+| Statements | assignment, compound assign (`+= -= *= /= %= \|= &= ^= <<= >>=`), `++`/`--`, `if/else`, `for`/`while`/`do-while`, `return`, `emit`, `require`/`assert`/`revert`, local vars, `unchecked {}` |
+| Expressions | arithmetic (checked → revert at declared width), comparisons, logical (`&& \|\| !`), bitwise/shift, narrowing casts `uintN(x)` (truncate), literals |
+| Integer semantics | true bit-width: `uint8 255+1` reverts; `unchecked{}` wraps to 0; `uint8(256)==0` |
+| Context vars | `msg.sender`, `msg.value`, `block.timestamp`, `block.number`, `address(this).balance` |
+| Events | `emit E(...)` → `seal_deposit_event` (keccak topic + SCALE data), decoded in the harness |
+| OOP | inheritance / interface flattening (`is`), modifiers (inlined as guards), enums, struct locals |
+| Cross-contract | `IFoo(addr).bar(args)` via `seal_call` with keccak4 selector |
+| ABI | keccak256 4-byte selectors + keccak event-signature topics — same as Ethereum |
