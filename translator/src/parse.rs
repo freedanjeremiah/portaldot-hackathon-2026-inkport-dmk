@@ -160,8 +160,10 @@ fn flatten(
                         if !has_body(f) {
                             continue;
                         }
-                        if let Some(id) = &f.name {
-                            upsert(&mut funcs, id.name.clone(), part.clone());
+                        if f.name.is_some() {
+                            // Key by full signature so overloads coexist while a
+                            // same-signature override still replaces its base.
+                            upsert(&mut funcs, fn_sig_key(f), part.clone());
                         }
                     }
                     // receive() / fallback() — keyed by their kind name.
@@ -263,6 +265,43 @@ fn collect_chain<'a>(
         out.push(def);
     }
     Ok(())
+}
+
+/// Stable canonical key for a function used during inheritance flattening.
+///
+/// Solidity allows function overloading: several functions sharing a name but
+/// differing in parameter arity/types. They are distinct functions and each
+/// has its own ABI selector. Flattening must therefore key by the *full
+/// signature* (`name(type,type,...)`), not by name alone — keying by name would
+/// let one overload silently overwrite another (a silent miscompile).
+///
+/// At the same time, an `override` in a derived contract has the *same*
+/// signature as the base it replaces, so it produces the same key and correctly
+/// upserts over the base. Param types are canonicalized through the same type
+/// mapper the codegen/selector path uses, so the key agrees with the eventual
+/// 4-byte selector grouping. Unmappable/unknown param types fall back to their
+/// source identifier (struct/enum names) so they still distinguish overloads.
+fn fn_sig_key(f: &FunctionDefinition) -> String {
+    use solang_parser::pt::Expression;
+    let name = f.name.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+    let mut tys: Vec<String> = Vec::new();
+    for (_, opt_p) in &f.params {
+        let Some(p) = opt_p.as_ref() else { continue };
+        // Canonicalize via the shared type mapper (uint256/uint collapse, etc.).
+        let key = if let Some(t) = crate::lower::map_type_structs(&p.ty, "u128") {
+            format!("{t:?}")
+        } else if let Expression::Variable(id) = &p.ty {
+            // Unknown named type (struct/enum/interface): use its identifier.
+            id.name.clone()
+        } else {
+            // Last resort: a structural debug of the type expression. This is
+            // only reached for exotic param types; it still differs across
+            // genuinely different types, so no overload is dropped.
+            format!("{:?}", p.ty)
+        };
+        tys.push(key);
+    }
+    format!("{name}({})", tys.join(","))
 }
 
 #[cfg(test)]

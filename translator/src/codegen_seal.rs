@@ -1563,6 +1563,57 @@ fn find_function<'a>(
     None
 }
 
+/// Find the parse-tree body for a specific (possibly overloaded) message.
+///
+/// Overloaded Solidity functions share a name but differ in arity/types. The
+/// lowered `Function` (`msg`) carries the disambiguating parameter list, so we
+/// match on name AND on the mapped parameter signature (count + value-kind).
+/// Without this an overload would silently bind to the wrong body — a silent
+/// miscompile. Falls back to name-only matching for the non-overloaded case so
+/// minor type-mapping mismatches don't lose a unique body.
+fn find_function_overload<'a>(
+    def: &'a ContractDefinition,
+    name: &str,
+    params: &[crate::ir::Param],
+    uint_strategy: &str,
+) -> Option<&'a FunctionDefinition> {
+    let want: Vec<ValTy> = params.iter().map(|p| ValTy::from_type(&p.ty)).collect();
+    let mut name_matches = 0usize;
+    let mut name_only: Option<&'a FunctionDefinition> = None;
+    for part in &def.parts {
+        if let ContractPart::FunctionDefinition(f) = part {
+            if !matches!(f.ty, FunctionTy::Function) {
+                continue;
+            }
+            if f.name.as_ref().map(|i| i.name.as_str()) != Some(name) {
+                continue;
+            }
+            name_matches += 1;
+            name_only.get_or_insert(f);
+            // Map this candidate's params the same way lowering does and compare
+            // the value-kind signature.
+            let cand: Vec<ValTy> = f
+                .params
+                .iter()
+                .filter_map(|(_, opt_p)| opt_p.as_ref())
+                .filter_map(|p| crate::lower::map_type(&p.ty, uint_strategy))
+                .map(|t| ValTy::from_type(&t))
+                .collect();
+            if cand == want {
+                return Some(f);
+            }
+        }
+    }
+    // Only one candidate by name → no ambiguity; use it even if the mapped
+    // signature didn't compare equal (e.g. exotic param the comparator can't
+    // model). With overloads present and no exact match, refuse to guess.
+    if name_matches <= 1 {
+        name_only
+    } else {
+        None
+    }
+}
+
 /// Collect modifier definitions by name (their guard statements minus `_`).
 fn collect_modifiers(def: &ContractDefinition) -> BTreeMap<String, Vec<Statement>> {
     let mut out = BTreeMap::new();
@@ -1945,19 +1996,24 @@ pub fn emit_seal(
     // Real keccak-256 4-byte selectors (ABI-compatible). Detect any collision
     // (e.g. genuine 4-byte clash or duplicate signature) and fail loud rather
     // than silently dispatching the wrong function.
+    //
+    // ANY duplicate selector is fatal — including the same name + same
+    // signature (a genuine duplicate function) which would otherwise emit two
+    // identical, conflicting dispatch arms. Overloads (same name, different
+    // signature) hash to *different* selectors and so pass this check, each
+    // keeping its own arm + metadata entry. Nothing is ever silently dropped.
     let mut seen_selectors: BTreeMap<[u8; 4], String> = BTreeMap::new();
     for msg in &c.messages {
         let sel = selector4(&msg.name, &msg.params);
+        let sig = fn_sig_string(&msg.name, &msg.params);
         if let Some(prev) = seen_selectors.get(&sel) {
-            if prev != &msg.name {
-                return Err(format!(
-                    "selector collision: `{}` and `{}` hash to the same 4-byte selector \
-                     0x{:02x}{:02x}{:02x}{:02x}",
-                    prev, msg.name, sel[0], sel[1], sel[2], sel[3]
-                ));
-            }
+            return Err(format!(
+                "selector collision: `{}` and `{}` hash to the same 4-byte selector \
+                 0x{:02x}{:02x}{:02x}{:02x}",
+                prev, sig, sel[0], sel[1], sel[2], sel[3]
+            ));
         }
-        seen_selectors.insert(sel, msg.name.clone());
+        seen_selectors.insert(sel, sig);
     }
 
     for (_i, msg) in c.messages.iter().enumerate() {
@@ -1969,7 +2025,7 @@ pub fn emit_seal(
             sel_bytes[0], sel_bytes[1], sel_bytes[2], sel_bytes[3]
         );
 
-        let fdef = find_function(def, false, &msg.name);
+        let fdef = find_function_overload(def, &msg.name, &msg.params, uint_strategy);
         let mut ctx = SealCtx::new(&slots, &c.events, &constants, &enum_values, &structs, &external_fns);
         register_params(&mut ctx, &msg.params);
         ctx.ret_kinds = msg.returns.iter().map(ValTy::from_type).collect();
@@ -2773,6 +2829,47 @@ mod tests {
         assert!(art.metadata_json.contains("\"selector\": \"0xcde4efa9\""));
         assert!(art.metadata_json.contains("\"selector\": \"0x6d4ce63c\""));
         assert!(art.metadata_json.contains("\"name\": \"get\""));
+    }
+
+    #[test]
+    fn overloaded_functions_both_emitted_with_distinct_selectors() {
+        // Two functions share the name `add` but differ in arity. Each must get
+        // its own metadata entry, its own ABI selector, and its own dispatch arm
+        // bound to the correct body. Previously the later overload silently
+        // dropped the earlier one (silent miscompile).
+        let src = r#"
+            contract Overload {
+                uint256 s;
+                function add(uint256 a) public { s += a; }
+                function add(uint256 a, uint256 b) public { s += a + b; }
+                function get() public view returns (uint256) { return s; }
+            }
+        "#;
+        let art = translate_seal(src).expect("translate");
+        // Canonical keccak4 selectors: add(uint256)=0x1003e2d2,
+        // add(uint256,uint256)=0x771602f7, get()=0x6d4ce63c.
+        assert!(
+            art.metadata_json.contains("\"selector\": \"0x1003e2d2\""),
+            "add(uint256) overload missing from metadata: {}",
+            art.metadata_json
+        );
+        assert!(
+            art.metadata_json.contains("\"selector\": \"0x771602f7\""),
+            "add(uint256,uint256) overload missing from metadata: {}",
+            art.metadata_json
+        );
+        // Both `add` entries present (two name matches), plus `get`.
+        assert_eq!(
+            art.metadata_json.matches("\"name\": \"add\"").count(),
+            2,
+            "expected exactly two `add` overloads in metadata"
+        );
+        // A distinct dispatch arm per selector.
+        assert!(art.lib_rs.contains("[16, 3, 226, 210] =>")); // 0x1003e2d2
+        assert!(art.lib_rs.contains("[119, 22, 2, 247] =>")); // 0x771602f7
+        // The 1-arg arm reads only `a`; the 2-arg arm also reads `b`. This
+        // proves each arm bound to its own body, not the last-writer's.
+        assert!(art.lib_rs.contains("input[20..36]"), "2-arg overload body must decode a second param");
     }
 
     #[test]

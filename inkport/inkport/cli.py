@@ -210,7 +210,7 @@ def call(
     signer = signer or cfg.default_signer
 
     meta = P.load_metadata(root, name)
-    m = P.message_by_name(meta, message)
+    m = P.message_by_name(meta, message, len(arg))
     portaldot, _, test_contract = _chain(root)
 
     args = P.coerce_args(m["args"], list(arg))
@@ -238,7 +238,15 @@ def call(
                 "origin": origin, "dest": addr, "value": value_planck,
                 "gasLimit": portaldot.GAS, "inputData": data}])["result"]
             res = r["result"]
-            if "Ok" not in res:
+            # A read can fail two ways: the node returns `Err`, or it returns
+            # `Ok` with the contract-revert bit set in `flags` (flags & 1). The
+            # latter still carries decodable bytes, so checking only for "Ok"
+            # would print a bogus value for a reverting view. Mirror `test`'s
+            # revert detection and surface a clear error instead.
+            reverted = "Ok" not in res
+            if not reverted and "Ok" in res:
+                reverted = (int(res["Ok"].get("flags", 0)) & 1) == 1
+            if reverted:
                 _err(f"{message} reverted: {res}")
                 raise typer.Exit(1)
             raw = bytes.fromhex(res["Ok"]["data"][2:])
@@ -366,7 +374,7 @@ def _run_test_spec(root: Path, net: dict, name: str) -> bool:
                     continue
 
                 msg = step["message"]
-                m = P.message_by_name(meta, msg)
+                m = P.message_by_name(meta, msg, len(step.get("args", [])))
                 args = P.coerce_args(m["args"], _resolve(step.get("args", [])))
                 data = test_contract.encode_call(m["selector"], m["args"], args)
                 signer = step.get("signer", deployer)

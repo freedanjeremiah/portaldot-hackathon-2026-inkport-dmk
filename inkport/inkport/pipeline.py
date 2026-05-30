@@ -102,11 +102,29 @@ def load_metadata(root: Path, name: str) -> dict:
     return json.loads(p.read_text())
 
 
-def message_by_name(meta: dict, msg: str) -> dict:
-    for m in meta["messages"]:
-        if m["name"] == msg:
+def message_by_name(meta: dict, msg: str, nargs: int | None = None) -> dict:
+    """Resolve a message by name, disambiguating overloads by arity.
+
+    Solidity function overloading produces several metadata entries that share
+    a `name` but differ in their `args` list (each with its own selector). When
+    `nargs` is given we match the overload whose argument count equals it; this
+    is what makes `add(uint256)` and `add(uint256,uint256)` independently
+    callable. Falls back to the first name match when `nargs` is None (or when
+    only one overload exists), preserving the previous single-arity behavior.
+    """
+    candidates = [m for m in meta["messages"] if m["name"] == msg]
+    if not candidates:
+        raise KeyError(f"message '{msg}' not in metadata for {meta.get('name')}")
+    if nargs is None or len(candidates) == 1:
+        return candidates[0]
+    for m in candidates:
+        if len(m["args"]) == nargs:
             return m
-    raise KeyError(f"message '{msg}' not in metadata for {meta.get('name')}")
+    raise KeyError(
+        f"no overload of '{msg}' with {nargs} arg(s) in metadata for "
+        f"{meta.get('name')} (available arities: "
+        f"{sorted(len(m['args']) for m in candidates)})"
+    )
 
 
 # --------------------------------------------------------------------------
