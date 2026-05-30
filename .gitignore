@@ -9,3 +9,9 @@ Cargo.lock
 .env
 deployments/
 build/
+
+# playground
+playground/node_modules/
+playground/.next/
+playground/next-env.d.ts
+playground/package-lock.json
