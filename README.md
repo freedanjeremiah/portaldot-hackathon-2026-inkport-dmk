@@ -72,10 +72,26 @@ Every supported construct is enforced **fail-loud**: an unsupported construct ma
 
 ## Validated contracts (deployed + asserted on the live node)
 
-`Flipper`, `Counter`, `SimpleStorage`, `ERC20`, `Ownable`, `Bank` (payable), `Signed`,
-`Pub`, `MinMax`, `Sum`, `Inc`, `Bits`, `Timed`, `IdStore`. Each has a `tests/<Name>.json`
-spec exercised by `inkport test` against `wss://portaldot.philotheephilix.in` — real
-extrinsics, real receipts, real revert/event checks. No mocks.
+30 contracts, each with a `tests/<Name>.json` spec exercised by `inkport test` against
+`wss://portaldot.philotheephilix.in` — real extrinsics, real receipts, real revert/event
+checks, no mocks:
+
+`Flipper` `Counter` `SimpleStorage` `ERC20` `ERC721` `Ownable` `Bank`(payable) `Escrow`
+`Auction` `Voting` `Greeter`(string) `IntList`(array) `Structs` `Enum` `Inherit`(inheritance)
+`Caller`+`Target`(cross-contract) `Overload`(overloading) `Signed`(i128) `NarrowMath`/`Narrow16`
+(narrow-width overflow→revert) `Unchecked`(wrap) `Cast`(narrowing truncation) `Bits` `Inc`
+`Sum` `MinMax` `Pub` `IdStore` `Timed`.
+
+## Integrity guarantee
+
+Every construct either **compiles to semantically-correct seal0 Rust** or makes
+`inkport translate` **exit non-zero (fail-loud)** — never a silent miscompile. This was
+hardened across an adversarial review loop that probed overloading, inheritance, `constant`,
+`receive`/`fallback`, keccak4 selectors, true checked arithmetic, narrow integer widths
+(`uintN`/`intN` overflow→revert, `unchecked`→wrap), and narrowing casts (`uint8(256)==0`),
+each verified on-chain. Unsupported surface (libraries, `delegatecall`, inline assembly,
+`tx.origin`, struct-in-array, non-trailing `string` params, …) is rejected with a clear
+error, not mis-translated.
 
 ## Scope note — Portaldot reference features
 

@@ -7,3 +7,5 @@ __pycache__/
 *.stripped.wasm
 Cargo.lock
 .env
+deployments/
+build/
