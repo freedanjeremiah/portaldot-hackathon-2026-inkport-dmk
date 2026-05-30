@@ -55,6 +55,14 @@ export async function POST(request: NextRequest) {
   const metaPath = path.join(buildDir, 'metadata.json');
   const rust = fs.readFileSync(rustPath, 'utf8');
   const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  if (!metadata.constructor.argNames) {
+    metadata.constructor.argNames = metadata.constructor.args.map((_: string, i: number) => `arg${i}`);
+  }
+  if (metadata.messages) {
+    for (const m of metadata.messages) {
+      if (!m.argNames) m.argNames = m.args.map((_: string, i: number) => `arg${i}`);
+    }
+  }
 
   return NextResponse.json({ rust, metadata });
 }

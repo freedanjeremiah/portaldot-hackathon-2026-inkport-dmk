@@ -77,6 +77,15 @@ export async function POST(request: NextRequest) {
 
         const metaPath = path.join(buildDir, 'metadata.json');
         const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        // Pad argNames so the UI can show parameter labels (translator binary omits them).
+        if (!metadata.constructor.argNames) {
+          metadata.constructor.argNames = metadata.constructor.args.map((_: string, i: number) => `arg${i}`);
+        }
+        if (metadata.messages) {
+          for (const m of metadata.messages) {
+            if (!m.argNames) m.argNames = m.args.map((_: string, i: number) => `arg${i}`);
+          }
+        }
         const crateName = readCrateName(path.join(buildDir, 'Cargo.toml'), name.toLowerCase());
 
         // ── Step 2: cargo build (streaming) ───────────────────────

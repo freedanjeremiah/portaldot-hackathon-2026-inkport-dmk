@@ -183,7 +183,7 @@ export function DeployPanel({ bus }: { bus: Bus }) {
             <div className="arg-grid">
               {args.length === 0 && <div className="field-note">constructor() — no arguments</div>}
               {args.map((t, i) => (
-                <ArgInput key={i} type={t} name={meta.constructor.argNames[i] || ''} value={d.args[i] || ''} onChange={v => bus.setDeployArg(i, v)} />
+                <ArgInput key={i} type={t} name={meta.constructor.argNames?.[i] || `arg${i}`} value={d.args[i] || ''} onChange={v => bus.setDeployArg(i, v)} />
               ))}
             </div>
             <div className="stage-actions">
@@ -295,7 +295,7 @@ function CallRailBody({ bus }: { bus: Bus }) {
       {sel && sel.args.map((t, i) => (
         <div key={i} className="rail-arg-row">
           <label className="rail-arg-label">
-            <span>{sel.argNames[i] || `arg${i}`}</span>
+            <span>{sel.argNames?.[i] || `arg${i}`}</span>
             <span className="at">: {t}</span>
           </label>
           <input className="arg-input" value={cl.args[i] || ''}
@@ -441,7 +441,7 @@ export function PipelineRail({ bus, active, onSelect, translateError }: {
             {(bus.metadata.constructor.args ?? []).map((t, i) => (
               <div key={i} className="rail-arg-row">
                 <label className="rail-arg-label">
-                  <span>{bus.metadata.constructor.argNames[i] || `arg${i}`}</span>
+                  <span>{bus.metadata.constructor.argNames?.[i] || `arg${i}`}</span>
                   <span className="at">: {t}</span>
                 </label>
                 <input className="arg-input" value={bus.deploy.args[i] || ''}
@@ -544,7 +544,7 @@ export function CallPanel({ bus }: { bus: Bus }) {
               <div className="arg-grid" style={{ marginTop: 14 }}>
                 {sel.args.length === 0 && <div className="field-note">{sel.name}() — no arguments</div>}
                 {sel.args.map((t, i) => (
-                  <ArgInput key={i} type={t} name={sel.argNames[i] || ''} value={cl.args[i] || ''} onChange={v => bus.setCallArg(i, v)} />
+                  <ArgInput key={i} type={t} name={sel.argNames?.[i] || `arg${i}`} value={cl.args[i] || ''} onChange={v => bus.setCallArg(i, v)} />
                 ))}
                 {sel.payable && (
                   <div className="arg-row">
