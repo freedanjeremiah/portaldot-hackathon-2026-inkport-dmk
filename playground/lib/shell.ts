@@ -21,6 +21,7 @@ export function spawnCollect(
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('error', (err: Error) => resolve({ stdout, stderr: err.message, code: 1 }));
     proc.on('close', (code: number | null) => resolve({ stdout, stderr, code: code ?? 1 }));
   });
 }
@@ -63,6 +64,10 @@ export function spawnStream(
       proc.stderr.on('data', (chunk: Buffer) => {
         stderrBuf += chunk.toString();
         chunk.toString().split('\n').forEach(l => { if (l) emitLine(l); });
+      });
+      proc.on('error', (err: Error) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'error', log: err.message })}\n\n`));
+        controller.close();
       });
       proc.on('close', (code: number | null) => {
         if ((code ?? 1) === 0) {
