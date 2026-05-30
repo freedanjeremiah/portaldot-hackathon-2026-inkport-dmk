@@ -13,6 +13,7 @@ deployments/
 # playground
 playground/node_modules/
 playground/.next/
+playground/.next-pg/
 playground/next-env.d.ts
 playground/package-lock.json
 playground/.env.local
@@ -21,3 +22,4 @@ playground/tsconfig.tsbuildinfo
 
 # editor / tool state
 .claire/
+playground/bun.lock

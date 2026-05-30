@@ -1,3 +1,5 @@
+import { apiUrl } from './api';
+
 export interface SSEPayload {
   type: string;
   cls?: string;
@@ -18,7 +20,7 @@ export async function readSSE(
     onError?: (payload: SSEPayload) => void;
   }
 ): Promise<void> {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
